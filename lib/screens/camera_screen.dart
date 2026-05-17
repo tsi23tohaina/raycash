@@ -77,7 +77,7 @@ class _CameraScreenState extends State<CameraScreen> {
     });
 
     socket!.onConnect((_) => print('Connecté au serveur WebSocket ReyCash'));
-    socket!.onDisconnect((_) => print('Déconnecté du serveur WebSocket'));
+    socket!.onDisconnect((_) => print('Décommenté du serveur WebSocket'));
   }
 
   // Prise de photo automatique et envoi vers l'API de classification
@@ -217,11 +217,11 @@ class _CameraScreenState extends State<CameraScreen> {
             ),
           ),
           
-          // Voile de chargement fluide pendant l'inférence TFLite
+          // Voile de chargement fluide pendant l'inférence TFLite (Correction de Colors.black3c -> Colors.black38)
           if (_isProcessing)
             Positioned.fill(
               child: Container(
-                color: Colors.black3c,
+                color: Colors.black38,
                 child: const Center(
                   child: CircularProgressIndicator(color: Colors.teal),
                 ),
