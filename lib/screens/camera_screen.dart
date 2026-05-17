@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:http/http.dart' as http;
-import 'package:socket_io_client/socket_io_client.dart' as IO; // Import ajouté
+import 'package:socket_io_client/socket_io_client.dart' as IO;
 
 class CameraScreen extends StatefulWidget {
   final Function(Map) onResult;
@@ -24,162 +24,209 @@ class CameraScreen extends StatefulWidget {
 class _CameraScreenState extends State<CameraScreen> {
   CameraController? _controller;
   bool _isInitialized = false;
-  bool _isAutoScanning = false;
   bool _isProcessing = false;
-  Timer? _timer;
-  IO.Socket? socket; // Instance Socket ajoutée
+  IO.Socket? socket;
 
   @override
   void initState() {
     super.initState();
     _initCamera();
-    _initSocket(); // Initialisation du socket
+    _initSocket();
   }
 
-  // --- LOGIQUE SOCKET.IO ---
+  // Initialisation passive de la caméra dès le lancement de l'APK
+  void _initCamera() async {
+    final cameras = await availableCameras();
+    if (cameras.isEmpty) return;
+
+    _controller = CameraController(
+      cameras.first, 
+      ResolutionPreset.medium, 
+      enableAudio: false
+    );
+    
+    try {
+      await _controller!.initialize();
+      if (!mounted) return;
+      setState(() => _isInitialized = true);
+    } catch (e) {
+      print("Erreur initialisation caméra : $e");
+    }
+  }
+
+  // Connexion WebSocket pour écouter les impulsions du matériel (Hardware)
   void _initSocket() {
-    // Connexion au serveur Flask via WebSocket
     socket = IO.io('http://${widget.serverIP}:5000', 
       IO.OptionBuilder()
-        .setTransports(['websocket']) // Important pour Flutter
+        .setTransports(['websocket'])
         .disableAutoConnect()
         .build()
     );
 
     socket!.connect();
 
-    // Ecoute du signal venant de l'ESP32 via Flask
+    // Reçoit le signal automatique transmis par l'ultrason
     socket!.on('command_from_esp', (data) {
       String action = data['action'];
-      print("Signal reçu de l'ESP32 : $action");
+      print("Signal matériel détecté : $action");
 
-      if (action == "START" && !_isAutoScanning) {
-        _toggleScan(); // Allume l'auto-scan (bouton devient rouge)
-      } else if (action == "STOP" && _isAutoScanning) {
-        _toggleScan(); // Arrête l'auto-scan (bouton devient vert)
+      // Si l'ESP32 détecte un objet à moins de 10cm, on déclenche la capture
+      if (action == "START" && !_isProcessing) {
+        _captureAndSend();
       }
     });
 
-    socket!.onConnect((_) => print('Connecté au serveur Flask (WebSocket)'));
-    socket!.onDisconnect((_) => print('Déconnecté du serveur'));
+    socket!.onConnect((_) => print('Connecté au serveur WebSocket ReyCash'));
+    socket!.onDisconnect((_) => print('Déconnecté du serveur WebSocket'));
   }
 
-  Future<void> _initCamera() async {
-    final cameras = await availableCameras();
-    if (cameras.isEmpty) return;
-    _controller = CameraController(cameras.first, ResolutionPreset.medium, enableAudio: false);
-    await _controller!.initialize();
-    if (mounted) setState(() => _isInitialized = true);
+  // Prise de photo automatique et envoi vers l'API de classification
+  Future<void> _captureAndSend() async {
+    if (_controller == null || !_controller!.value.isInitialized || _isProcessing) return;
+
+    setState(() {
+      _isProcessing = true;
+    });
+
+    try {
+      final XFile image = await _controller!.takePicture();
+      
+      var request = http.MultipartRequest(
+        'POST', 
+        Uri.parse('http://${widget.serverIP}:5000/predict')
+      );
+      
+      request.files.add(await http.MultipartFile.fromPath('image', image.path));
+      
+      var streamedResponse = await request.send();
+      var response = await http.Response.fromStream(streamedResponse);
+
+      if (response.statusCode == 200) {
+        Map result = json.decode(response.body);
+        // Construit l'URL complète de l'image pour l'historique de l'application
+        result['full_image_url'] = 'http://${widget.serverIP}:5000${result['image_url']}';
+        
+        // Envoie les données vers le NavigationHub pour basculer sur l'affichage des points
+        widget.onResult(result);
+      } else {
+        print("Erreur réponse serveur : ${response.statusCode}");
+      }
+    } catch (e) {
+      print("Erreur lors de la capture automatique : $e");
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
+      }
+    }
   }
 
+  // Boîte de dialogue pour modifier dynamiquement l'IP si elle change
   void _showIPDialog() {
-    TextEditingController _ipController = TextEditingController(text: widget.serverIP);
+    TextEditingController ipController = TextEditingController(text: widget.serverIP);
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text("Config Serveur"),
-        content: TextField(controller: _ipController, decoration: const InputDecoration(labelText: "IP du PC")),
+        title: const Text("Configuration IP Serveur"),
+        content: TextField(
+          controller: ipController,
+          decoration: const InputDecoration(hintText: "Ex: 10.162.138.163"),
+        ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text("Annuler")),
-          ElevatedButton(
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Annuler"),
+          ),
+          TextButton(
             onPressed: () {
-              widget.onIPUpdate(_ipController.text);
-              socket?.disconnect(); // Reconnecter avec la nouvelle IP
-              _initSocket();
+              widget.onIPUpdate(ipController.text);
               Navigator.pop(context);
-            }, 
-            child: const Text("Sauver")
+              // Réinitialise la connexion WebSocket sur la nouvelle adresse
+              socket?.disconnect();
+              _initSocket();
+            },
+            child: const Text("Enregistrer"),
           ),
         ],
       ),
     );
   }
 
-  Future<void> _captureAndSend() async {
-    if (_isProcessing || _controller == null || !_controller!.value.isInitialized) return;
-
-    setState(() => _isProcessing = true);
-    try {
-      final XFile image = await _controller!.takePicture();
-      var request = http.MultipartRequest('POST', Uri.parse("http://${widget.serverIP}:5000/predict"));
-      request.files.add(await http.MultipartFile.fromPath('image', image.path));
-
-      var streamedResponse = await request.send();
-      var response = await http.Response.fromStream(streamedResponse);
-
-      if (response.statusCode == 200) {
-        var data = json.decode(response.body);
-        data['full_image_url'] = "http://${widget.serverIP}:5000${data['image_url']}";
-        widget.onResult(data);
-      }
-    } catch (e) {
-      print("Erreur capture : $e");
-    } finally {
-      setState(() => _isProcessing = false);
-    }
-  }
-
-  void _toggleScan() {
-    setState(() {
-      _isAutoScanning = !_isAutoScanning;
-    });
-
-    if (_isAutoScanning) {
-      // Démarre le cycle de capture toutes les 3 secondes
-      _timer = Timer.periodic(const Duration(seconds: 3), (timer) {
-        if (_isAutoScanning) _captureAndSend();
-      });
-    } else {
-      _timer?.cancel();
-    }
-  }
-
   @override
   void dispose() {
-    _timer?.cancel();
     _controller?.dispose();
-    socket?.disconnect(); // Fermeture propre du socket
-    socket?.dispose();
+    socket?.disconnect();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!_isInitialized) return const Center(child: CircularProgressIndicator());
+    if (!_isInitialized) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator(color: Colors.teal)),
+      );
+    }
+    
     return Scaffold(
       body: Stack(
         children: [
+          // Aperçu plein écran de la caméra
           Positioned.fill(child: CameraPreview(_controller!)),
+          
+          // Cadre / Viseur central pour guider l'alignement du déchet
           Center(
             child: Container(
-              width: 260, height: 260,
+              width: 260,
+              height: 260,
               decoration: BoxDecoration(
-                border: Border.all(color: _isAutoScanning ? Colors.green : Colors.white, width: 3),
-                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: _isProcessing ? Colors.orange : Colors.white, 
+                  width: 3
+                ),
+                borderRadius: BorderRadius.circular(25),
               ),
             ),
           ),
+          
+          // Bandeau d'état inférieur de l'automate
           Positioned(
-            bottom: 40, left: 0, right: 0,
-            child: Column(
-              children: [
-                GestureDetector(
-                  onLongPress: _showIPDialog,
+            bottom: 50, left: 20, right: 20,
+            child: Center(
+              child: GestureDetector(
+                onLongPress: _showIPDialog, // Menu de configuration IP via appui long secret
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                  decoration: BoxDecoration(
+                    color: Colors.black87,
+                    borderRadius: BorderRadius.circular(30),
+                    boxShadow: const [
+                      BoxShadow(color: Colors.black26, blurRadius: 10, offset: Offset(0, 4))
+                    ],
+                  ),
                   child: Text(
-                    _isAutoScanning ? "ESP32 : SCAN EN COURS..." : "ESP32 : ATTENTE SIGNAL",
-                    style: const TextStyle(color: Colors.white, backgroundColor: Colors.black45, fontWeight: FontWeight.bold),
+                    _isProcessing ? "🔄 CLASSIFICATION DU DÉCHET..." : "🤖 REYCASH : ATTENTE MATÉRIEL",
+                    style: const TextStyle(
+                      color: Colors.white, 
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.5
+                    ),
                   ),
                 ),
-                const SizedBox(height: 20),
-                // Ce bouton change de couleur et d'icône automatiquement
-                FloatingActionButton.large(
-                  onPressed: _toggleScan, // On peut toujours le forcer manuellement
-                  backgroundColor: _isAutoScanning ? Colors.red : Colors.teal,
-                  child: Icon(_isAutoScanning ? Icons.stop : Icons.play_arrow),
-                ),
-              ],
+              ),
             ),
           ),
+          
+          // Voile de chargement fluide pendant l'inférence TFLite
+          if (_isProcessing)
+            Positioned.fill(
+              child: Container(
+                color: Colors.black3c,
+                child: const Center(
+                  child: CircularProgressIndicator(color: Colors.teal),
+                ),
+              ),
+            ),
         ],
       ),
     );
