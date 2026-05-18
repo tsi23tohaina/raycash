@@ -326,14 +326,14 @@
             <div class="stat-label">Recyclables</div>
             <div class="stat-value" id="statRecyclable">0</div>
         </div>
-        <div class="stat points">
-            <div class="stat-label">Total points</div>
-            <div class="stat-value" id="statPoints">0</div>
-        </div>
         <div class="stat non-recyclable">
             <div class="stat-label">Non recyclables</div>
             <div class="stat-value" id="statNonRecyclable">0</div>
             <div class="stat-sub" id="statNonRecyclableSub">refusés</div>
+        </div>
+        <div class="stat points">
+            <div class="stat-label">Total points</div>
+            <div class="stat-value" id="statPoints">0</div>
         </div>
     </div>
 
@@ -557,8 +557,9 @@
         if (empty.parentElement) empty.remove();
         const card = document.createElement('div');
         card.className = 'scan-card ' + (isRecyclable ? 'recyclable' : 'unknown');
-        const cardImg = imgPath
-            ? `<img src="${imgPath}${imgPath.includes('?') ? '&' : '?'}key=${encodeURIComponent(API_KEY)}" alt="" style="width:100%;height:80px;object-fit:cover;border-radius:6px;margin-bottom:6px;">`
+        const cardImgPath = data.image_url || (data.image_urls && data.image_urls[0]) || '';
+        const cardImg = cardImgPath
+            ? `<img src="${cardImgPath}${cardImgPath.includes('?') ? '&' : '?'}key=${encodeURIComponent(API_KEY)}" alt="" style="width:100%;height:80px;object-fit:cover;border-radius:6px;margin-bottom:6px;">`
             : '';
         card.innerHTML = `
             ${cardImg}
