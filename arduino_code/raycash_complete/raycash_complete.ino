@@ -38,7 +38,7 @@ const int ANGLE_NON_RECYCLABLE    = 0;
 
 const float DISTANCE_SEUIL_CM   = 10.0;
 const unsigned long DEBOUNCE_MS = 50;
-const unsigned long TRI_DUREE_MS         = 4000;  // duree position servo
+const unsigned long TRI_DUREE_MS         = 2000;  // duree position servo (laisse tomber le dechet)
 const unsigned long TRI_RETOUR_MS        =  500;  // pause avant retour repos
 const unsigned long VERROU_TIMEOUT_MS    = 15000; // libere verrou si serveur muet
 const unsigned long WIFI_TIMEOUT_MS      = 20000; // setup : timeout Wi-Fi
@@ -62,6 +62,7 @@ enum EtatTri { TRI_INACTIF, TRI_PIVOT, TRI_RETOUR };
 
 bool systemeActive       = false;
 bool verrouSignal        = false;
+bool waitingForClear     = false;  // anti-spam : exige sortie zone HC-SR04 avant prochain trigger
 unsigned long verrouT0   = 0;
 
 EtatTri etatTri          = TRI_INACTIF;
@@ -286,7 +287,8 @@ void avancerEtatTri() {
     triT0 = maintenant;
   } else if (etatTri == TRI_RETOUR && maintenant - triT0 >= TRI_RETOUR_MS) {
     etatTri = TRI_INACTIF;
-    verrouSignal = false;  // libere : pret pour un autre dechet
+    verrouSignal = false;
+    waitingForClear = true;  // empeche re-trigger tant que l'objet n'est pas retire
     lcd.clear();
   }
 }
@@ -370,8 +372,17 @@ void loop() {
     derniereLectureDist = millis();
     distanceActuelle = mesurerDistanceCm();
 
-    if (distanceActuelle > 0 && distanceActuelle <= DISTANCE_SEUIL_CM &&
-        !verrouSignal) {
+    bool zoneOccupee = (distanceActuelle > 0 && distanceActuelle <= DISTANCE_SEUIL_CM);
+    bool zoneLibre   = (distanceActuelle < 0 || distanceActuelle > DISTANCE_SEUIL_CM);
+
+    // Apres un tri, on attend que la zone soit liberee avant d'autoriser un
+    // nouveau trigger (sinon le meme dechet declenche en boucle).
+    if (waitingForClear && zoneLibre) {
+      waitingForClear = false;
+      Serial.println("[SR04] zone liberee, re-arme");
+    }
+
+    if (zoneOccupee && !verrouSignal && !waitingForClear) {
       Serial.printf("[SR04] seuil atteint (%.1f cm) -> POST START\n", distanceActuelle);
       verrouSignal = true;
       verrouT0 = millis();
@@ -384,6 +395,7 @@ void loop() {
       millis() - verrouT0 > VERROU_TIMEOUT_MS) {
     Serial.println("[LOCK] timeout, libere verrou");
     verrouSignal = false;
+    waitingForClear = true;  // meme apres timeout : exige sortie zone avant nouvelle tentative
     beep(400, 400);
   }
 

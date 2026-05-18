@@ -100,10 +100,22 @@
         .last-scan-time { color: #555; font-size: 12px; }
         .last-scan-body {
             display: grid;
-            grid-template-columns: 1fr 1.5fr;
-            gap: 32px;
+            grid-template-columns: 240px 1fr 1.5fr;
+            gap: 24px;
             align-items: center;
         }
+        .last-scan-photo {
+            width: 240px;
+            height: 240px;
+            object-fit: cover;
+            border-radius: 16px;
+            background: #0a0a0a;
+            border: 2px solid #2a2f3a;
+            display: none;
+        }
+        .last-scan-photo.visible { display: block; }
+        .last-scan.recyclable .last-scan-photo { border-color: #00a86b; }
+        .last-scan.uncertain  .last-scan-photo { border-color: #ffa500; }
         .last-scan-verdict {
             text-align: center;
             padding: 16px;
@@ -236,12 +248,20 @@
         .scan-card {
             background: #1a1d24;
             border-radius: 12px;
-            padding: 14px;
+            padding: 12px;
             border: 1px solid #2a2f3a;
             display: flex;
             flex-direction: column;
-            gap: 4px;
+            gap: 6px;
             animation: slideIn 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .scan-card-img {
+            width: 100%;
+            aspect-ratio: 1 / 1;
+            object-fit: cover;
+            border-radius: 8px;
+            background: #0a0a0a;
+            margin-bottom: 4px;
         }
         @keyframes slideIn {
             from { opacity: 0; transform: translateY(10px) scale(0.97); }
@@ -324,6 +344,9 @@
                 <div class="last-scan-time" id="lastScanTime"></div>
             </div>
             <div class="last-scan-body">
+                <div class="last-scan-photo-wrap" id="lastScanPhotoWrap" style="display:none;flex:0 0 220px;margin-right:18px;">
+                    <img id="lastScanPhoto" alt="Photo dechet" style="width:220px;max-height:220px;object-fit:cover;border-radius:10px;border:1px solid #222;display:block;">
+                </div>
                 <div class="last-scan-verdict">
                     <div class="last-scan-label" id="lastScanLabel">—</div>
                     <div class="last-scan-confidence" id="lastScanConfidence"></div>
@@ -356,6 +379,10 @@
 
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <script>
+    // Cle API injectee depuis le template Flask : permet aux img tags de
+    // recuperer les photos /uploads/<id>.jpg via ?key=...
+    const API_KEY = {{ api_key|tojson }};
+
     const statObjects = document.getElementById('statObjects');
     const statRecyclable = document.getElementById('statRecyclable');
     const statPoints = document.getElementById('statPoints');
@@ -376,6 +403,8 @@
     const lastScanHeaderTitle = document.getElementById('lastScanHeaderTitle');
     const modelsTitle = document.getElementById('modelsTitle');
     const modelReasoning = document.getElementById('modelReasoning');
+    const lastScanPhotoWrap = document.getElementById('lastScanPhotoWrap');
+    const lastScanPhoto = document.getElementById('lastScanPhoto');
 
     // Détecte si le backend renvoie 1 ou plusieurs modèles (ex: Gemini = 1, Ensemble V4 = 3)
     // et ajuste le wording de l'UI en conséquence.
@@ -421,6 +450,16 @@
         lastScanConfidence.textContent = `Confiance ${labelSource} · ${data.confidence} · ${data.n_views || 1} vue${(data.n_views || 1) > 1 ? 's' : ''}`;
         lastScanPoints.textContent = (data.points || 0) > 0 ? '+' + data.points + ' pts' : '';
         lastScanTime.textContent = fmtTime(new Date());
+
+        // Photo du dechet : data.image_url (ou premier de image_urls) + ?key=
+        // Cache si pas de photo (mode live preview sans persistance).
+        const imgPath = data.image_url || (data.image_urls && data.image_urls[0]) || '';
+        if (imgPath) {
+            lastScanPhoto.src = imgPath + (imgPath.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(API_KEY);
+            lastScanPhotoWrap.style.display = 'block';
+        } else {
+            lastScanPhotoWrap.style.display = 'none';
+        }
 
         // Titre du bloc détail (gauche)
         lastScanHeaderTitle.textContent = isEnsemble
@@ -510,11 +549,15 @@
             }
         }
 
-        // Petite carte dans l'historique
+        // Petite carte dans l'historique avec miniature photo si dispo.
         if (empty.parentElement) empty.remove();
         const card = document.createElement('div');
         card.className = 'scan-card ' + (isRecyclable ? 'recyclable' : 'unknown');
+        const cardImg = imgPath
+            ? `<img src="${imgPath}${imgPath.includes('?') ? '&' : '?'}key=${encodeURIComponent(API_KEY)}" alt="" style="width:100%;height:80px;object-fit:cover;border-radius:6px;margin-bottom:6px;">`
+            : '';
         card.innerHTML = `
+            ${cardImg}
             <div class="scan-card-label">${escapeHtml(data.label || 'Inconnu')}</div>
             <div class="scan-card-meta">${escapeHtml(data.confidence || '?')}</div>
             <div class="scan-card-points">${isRecyclable ? '+' + (data.points || 0) + ' pts' : '—'}</div>

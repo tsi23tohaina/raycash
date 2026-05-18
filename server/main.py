@@ -195,8 +195,13 @@ def ready():
 
 # --- ROUTES MÉTIER ---
 @app.route("/uploads/<path:filename>")
-@require_api_key
 def uploaded_file(filename):
+    # Accepte la cle via header X-API-Key (clients programmatiques) OU query
+    # string ?key=... (img tags dans session.html, qui ne peuvent pas envoyer
+    # de headers custom).
+    provided = request.headers.get("X-API-Key") or request.args.get("key", "")
+    if not SETTINGS.api_key or provided != SETTINGS.api_key:
+        return jsonify({"error": "unauthorized"}), 401
     safe = secure_filename(filename)
     if safe != filename or not safe:
         return jsonify({"error": "filename invalide"}), 400
@@ -515,7 +520,10 @@ def scanner():
 @limiter.exempt
 def session_page():
     """Page laptop qui affiche en live les scans du téléphone via Socket.IO."""
-    return render_template("session.html")
+    # api_key passe en template pour permettre aux img tags d'authentifier
+    # leur requete /uploads/... via ?key=... (un img ne peut pas envoyer
+    # X-API-Key header).
+    return render_template("session.html", api_key=SETTINGS.api_key)
 
 
 # --- Socket.IO event handlers ---
