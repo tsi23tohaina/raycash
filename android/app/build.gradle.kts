@@ -38,11 +38,6 @@ android {
         versionName = flutter.versionName
     }
 
-    aaptOptions {
-        noCompress("tflite")
-        noCompress("lite")
-    }
-
     signingConfigs {
         create("release") {
             if (keystorePropertiesFile.exists()) {
@@ -56,10 +51,10 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false      // Désactive la réduction de code
-            isShrinkResources = false   // Désactive la suppression de ressources
+            isMinifyEnabled = true       // R8 : obfusque et réduit le bytecode
+            isShrinkResources = true     // Supprime les ressources inutilisées
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            
+
             signingConfig = if (keystorePropertiesFile.exists()) {
                 signingConfigs.getByName("release")
             } else {

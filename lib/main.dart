@@ -1,6 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
+import 'services/socket_service.dart';
+import 'services/storage_service.dart';
+import 'state/app_state.dart';
 import 'screens/camera_screen.dart';
 import 'screens/data_screen.dart';
+
+const String _apiKey =
+    String.fromEnvironment('RAYCASH_API_KEY', defaultValue: '');
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -12,14 +20,20 @@ class ReycashApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'ReyCash',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
-        useMaterial3: true,
+    return ChangeNotifierProvider<AppState>(
+      create: (_) => AppState(
+        storage: StorageService(),
+        socket: SocketService(apiKey: _apiKey),
       ),
-      home: const NavigationHub(),
+      child: MaterialApp(
+        debugShowCheckedModeBanner: false,
+        title: 'ReyCash',
+        theme: ThemeData(
+          colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
+          useMaterial3: true,
+        ),
+        home: const NavigationHub(),
+      ),
     );
   }
 }
@@ -33,51 +47,33 @@ class NavigationHub extends StatefulWidget {
 
 class _NavigationHubState extends State<NavigationHub> {
   int _currentIndex = 0;
-  String _currentIP = "192.168.1.104"; // IP par défaut
-  List<Map> _scannedItems = []; // Liste de tous les déchets scannés dans la session
+  final GlobalKey<CameraScreenState> _cameraKey = GlobalKey<CameraScreenState>();
 
-  // Fonction pour changer l'IP (appelée depuis le menu caché)
-  void _updateIP(String newIP) {
-    setState(() {
-      _currentIP = newIP;
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      context.read<AppState>().bootstrap(onSignal: _onHardwareSignal);
     });
   }
 
-  // Ajoute un déchet à la liste
-  void _addResult(Map result) {
-    setState(() {
-      _scannedItems.add(result);
-    });
-  }
-
-  // Réinitialise la session
-  void _resetSession() {
-    setState(() {
-      _scannedItems.clear();
-      _currentIndex = 0;
-    });
+  void _onHardwareSignal(String action) {
+    if (action == 'START') {
+      _cameraKey.currentState?.triggerCapture();
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final List<Widget> _pages = [
-      CameraScreen(
-        onResult: _addResult, 
-        serverIP: _currentIP, 
-        onIPUpdate: _updateIP
-      ),
-      DataScreen(
-        items: _scannedItems, 
-        onReset: _resetSession,
-        serverIP: _currentIP,
-      )
+    final pages = <Widget>[
+      CameraScreen(key: _cameraKey),
+      const DataScreen(),
     ];
-
     return Scaffold(
-      body: _pages[_currentIndex],
+      body: pages[_currentIndex],
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _currentIndex,
-        onTap: (index) => setState(() => _currentIndex = index),
+        onTap: (i) => setState(() => _currentIndex = i),
         selectedItemColor: Colors.teal,
         items: const [
           BottomNavigationBarItem(icon: Icon(Icons.camera_alt), label: 'Scanner'),

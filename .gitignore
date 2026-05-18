@@ -54,3 +54,42 @@ app.*.map.json
 *.keystore
 *.p12
 *.key
+
+# Secrets locaux (Arduino, etc.)
+arduino_code/**/secrets.h
+!arduino_code/**/secrets.h.example
+
+# Server runtime artifacts
+server/uploads/
+server/raycash.db
+server/raycash.db-journal
+server/raycash.db-wal
+server/raycash.db-shm
+server/logs/
+server/venv/
+server/__pycache__/
+server/tests/__pycache__/
+server/.pytest_cache/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Flutter local generated
+flutter-run.log
+flutter-version.log
+flutter-doctor.log
+flask.log
+flask-demo.log
+
+# ML — artefacts d'entraînement intermédiaires (lourds, regenerables)
+ml/models/*.tflite
+ml/models/*.h5
+ml/models/*.keras
+ml/models/checkpoints/
+ml/datasets/
+# Archive redondante (les .tflite individuels du dossier ensemble suffisent)
+server/models/ensemble/*.zip
+# On garde le .gitkeep pour préserver la structure
+!ml/models/.gitkeep

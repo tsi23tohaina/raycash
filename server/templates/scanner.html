@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#000000">
+    <title>RayCash Scanner</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body {
+            width: 100%; height: 100%;
+            background: #000;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            color: #fff;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+        /* Stacked layers : webcam preview (live) + preview de la photo capturée (freeze) */
+        #webcam, #frozenImg {
+            position: fixed;
+            inset: 0;
+            width: 100%; height: 100%;
+            object-fit: cover;
+            z-index: 1;
+        }
+        #frozenImg { z-index: 2; display: none; }
+        #frozenImg.visible { display: block; }
+
+        .topbar {
+            position: fixed;
+            top: 0; left: 0; right: 0;
+            padding: 14px 16px;
+            background: linear-gradient(to bottom, rgba(0,0,0,0.7), transparent);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 10;
+        }
+        .brand { font-weight: 700; font-size: 16px; }
+        .status { font-size: 12px; opacity: 0.9; }
+
+        /* Flash : décalé SOUS le topbar pour ne pas se chevaucher avec le status text */
+        .flash-btn {
+            position: fixed;
+            top: 72px; right: 12px;
+            width: 48px; height: 48px;
+            border-radius: 50%;
+            background: rgba(0,0,0,0.6);
+            color: #fff;
+            border: 1px solid rgba(255,255,255,0.2);
+            font-size: 22px;
+            cursor: pointer;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 11;
+            backdrop-filter: blur(8px);
+            transition: background 0.15s, transform 0.1s;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.4);
+        }
+        .flash-btn.visible { display: flex; }
+        .flash-btn.on {
+            background: rgba(255,215,0,0.9);
+            color: #000;
+            box-shadow: 0 0 24px rgba(255,215,0,0.6);
+        }
+        .flash-btn:active { transform: scale(0.92); }
+
+        /* Bouton capture central — caché en mode "résultat" */
+        .capture-btn {
+            position: fixed;
+            bottom: 36px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 84px;
+            height: 84px;
+            border-radius: 50%;
+            background: white;
+            border: 5px solid rgba(255,255,255,0.4);
+            outline: none;
+            cursor: pointer;
+            z-index: 10;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            transition: transform 0.1s, opacity 0.3s;
+        }
+        .capture-btn:active { transform: translateX(-50%) scale(0.92); }
+        .capture-btn:disabled { background: #555; border-color: rgba(255,255,255,0.15); cursor: not-allowed; }
+        .capture-btn.hidden { opacity: 0; pointer-events: none; }
+
+        /* Bouton "Nouveau scan" — visible quand résultat affiché */
+        .new-scan-btn {
+            position: fixed;
+            bottom: 36px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 16px 32px;
+            border-radius: 50px;
+            background: rgba(255,255,255,0.95);
+            color: #000;
+            font-weight: 700;
+            font-size: 15px;
+            border: none;
+            outline: none;
+            cursor: pointer;
+            z-index: 10;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            display: none;
+            transition: transform 0.1s;
+        }
+        .new-scan-btn.visible { display: block; }
+        .new-scan-btn:active { transform: translateX(-50%) scale(0.96); }
+
+        /* Flash shutter overlay : éclair blanc bref à la capture */
+        .shutter {
+            position: fixed;
+            inset: 0;
+            background: white;
+            z-index: 20;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.08s;
+        }
+        .shutter.flash { opacity: 0.9; }
+
+        /* Loading overlay pendant l'analyse IA */
+        .loading-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.55);
+            backdrop-filter: blur(4px);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+            z-index: 12;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.25s;
+        }
+        .loading-overlay.visible { opacity: 1; pointer-events: auto; }
+        .spinner {
+            width: 56px; height: 56px;
+            border: 4px solid rgba(255,255,255,0.2);
+            border-top-color: #00d8d8;
+            border-radius: 50%;
+            animation: spin 0.9s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .loading-text {
+            font-size: 16px;
+            color: #fff;
+            text-shadow: 0 2px 8px rgba(0,0,0,0.6);
+        }
+        .loading-sub {
+            font-size: 12px;
+            color: #bbb;
+        }
+
+        /* Résultat affiché par-dessus l'image figée */
+        .result-overlay {
+            position: fixed;
+            bottom: 130px;
+            left: 16px; right: 16px;
+            background: rgba(0,0,0,0.92);
+            backdrop-filter: blur(12px);
+            border-radius: 20px;
+            padding: 22px 24px;
+            text-align: center;
+            z-index: 11;
+            display: none;
+            border: 3px solid transparent;
+            animation: slideUp 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .result-overlay.visible { display: block; }
+        .result-overlay.success { border-color: #00d88e; }
+        .result-overlay.uncertain { border-color: #ffa500; }
+        .result-overlay.error { border-color: #ff6b6b; }
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        .result-label { font-size: 32px; font-weight: 800; line-height: 1.1; }
+        .result-label.success { color: #00d88e; }
+        .result-label.uncertain { color: #ffa500; }
+        .result-label.error { color: #ff6b6b; }
+        .result-label.neutral { color: #ddd; }
+        .result-points { font-size: 36px; font-weight: 800; color: #ffd700; margin-top: 6px; }
+        .result-meta { font-size: 13px; color: #bbb; margin-top: 6px; }
+        .result-reasoning {
+            font-size: 12px;
+            color: #aaa;
+            margin-top: 12px;
+            font-style: italic;
+            line-height: 1.4;
+            padding-top: 12px;
+            border-top: 1px solid rgba(255,255,255,0.1);
+        }
+
+        /* --- Animation célébration (recyclable) --- */
+        .confetti-container {
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            z-index: 18;
+            overflow: hidden;
+        }
+        .confetti-piece {
+            position: absolute;
+            top: -30px;
+            border-radius: 2px;
+            animation: confetti-fall linear forwards;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+        }
+        @keyframes confetti-fall {
+            0%   { transform: translateY(0) rotate(0deg); opacity: 1; }
+            100% { transform: translateY(115vh) rotate(720deg); opacity: 0.2; }
+        }
+
+        /* Bannière "HOURRA" centrée — couleur pleine (compatible tous mobiles) */
+        .celebration-banner {
+            position: fixed;
+            top: 35%;
+            left: 0; right: 0;
+            text-align: center;
+            color: #00ff9d;
+            font-size: 72px;
+            font-weight: 900;
+            letter-spacing: 6px;
+            text-shadow:
+                0 0 18px rgba(0,255,157,0.9),
+                0 0 36px rgba(0,255,157,0.6),
+                0 4px 12px rgba(0,0,0,0.6);
+            z-index: 19;
+            opacity: 0;
+            pointer-events: none;
+            transform: scale(0.5);
+            transition: opacity 0.25s, transform 0.45s cubic-bezier(0.16, 1.6, 0.3, 1);
+        }
+        .celebration-banner.visible {
+            opacity: 1;
+            transform: scale(1);
+        }
+        .celebration-banner-sub {
+            display: block;
+            font-size: 28px;
+            font-weight: 700;
+            letter-spacing: 2px;
+            margin-top: 12px;
+            color: #ffd700;
+            text-shadow: 0 0 14px rgba(255,215,0,0.8), 0 3px 8px rgba(0,0,0,0.5);
+        }
+
+        /* Icône "Non recyclable" */
+        .no-recyclable-banner {
+            position: fixed;
+            top: 35%;
+            left: 0; right: 0;
+            text-align: center;
+            font-size: 96px;
+            z-index: 19;
+            opacity: 0;
+            pointer-events: none;
+            transform: scale(0.5);
+            transition: opacity 0.25s, transform 0.45s cubic-bezier(0.16, 1.4, 0.3, 1);
+        }
+        .no-recyclable-banner.visible {
+            opacity: 0.95;
+            transform: scale(1);
+        }
+
+        /* Hint sous le bouton (mode capture) */
+        .hint {
+            position: fixed;
+            bottom: 142px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.55);
+            padding: 6px 14px;
+            border-radius: 14px;
+            font-size: 12px;
+            color: #ccc;
+            z-index: 10;
+            backdrop-filter: blur(6px);
+            pointer-events: none;
+            transition: opacity 0.3s;
+        }
+        .hint.hidden { opacity: 0; }
+    </style>
+</head>
+<body>
+    <video id="webcam" autoplay playsinline muted></video>
+    <img id="frozenImg" alt="Photo capturée">
+
+    <div class="topbar">
+        <span class="brand">🌀 RayCash</span>
+        <span class="status" id="status">Démarrage caméra...</span>
+    </div>
+
+    <button class="flash-btn" id="flashBtn" type="button" aria-label="Flash">⚡</button>
+
+    <div class="hint" id="hint">Vise l'objet et appuie sur le bouton</div>
+
+    <!-- Bouton capture central (mode "preview live") -->
+    <button class="capture-btn" id="captureBtn" type="button" disabled aria-label="Scanner"></button>
+
+    <!-- Bouton "nouveau scan" (mode "résultat affiché") -->
+    <button class="new-scan-btn" id="newScanBtn" type="button">🔄 NOUVEAU SCAN</button>
+
+    <!-- Loading overlay -->
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+        <div class="loading-text" id="loadingText">Analyse en cours...</div>
+        <div class="loading-sub" id="loadingSub">IA en cours d'inférence</div>
+    </div>
+
+    <!-- Résultat -->
+    <div class="result-overlay" id="resultOverlay">
+        <div class="result-label" id="resultLabel"></div>
+        <div class="result-points" id="resultPoints" style="display:none;"></div>
+        <div class="result-meta" id="resultMeta"></div>
+        <div class="result-reasoning" id="resultReasoning"></div>
+    </div>
+
+    <!-- Flash shutter (effet visuel) -->
+    <div class="shutter" id="shutter"></div>
+
+    <!-- Confetti + bannière hourra (recyclable) -->
+    <div class="confetti-container" id="confettiContainer"></div>
+    <div class="celebration-banner" id="celebrationBanner">
+        HOURRA !
+        <span class="celebration-banner-sub" id="celebrationBannerSub">+0 PTS</span>
+    </div>
+    <div class="no-recyclable-banner" id="noRecyclableBanner">🚫</div>
+
+    <canvas id="canvas" style="display:none;"></canvas>
+
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script>
+    const API_KEY = "{{ api_key }}";
+    // On limite la résolution de l'image envoyée à Gemini pour accélérer
+    // l'upload sans sacrifier la précision. 1024px de côté max = ~150KB JPEG.
+    const MAX_UPLOAD_DIM = 1024;
+    const UPLOAD_QUALITY = 0.82;
+
+    const video = document.getElementById('webcam');
+    const frozenImg = document.getElementById('frozenImg');
+    const canvas = document.getElementById('canvas');
+    const captureBtn = document.getElementById('captureBtn');
+    const newScanBtn = document.getElementById('newScanBtn');
+    const statusEl = document.getElementById('status');
+    const flashBtn = document.getElementById('flashBtn');
+    const hint = document.getElementById('hint');
+    const shutter = document.getElementById('shutter');
+    const loadingOverlay = document.getElementById('loadingOverlay');
+    const loadingText = document.getElementById('loadingText');
+    const resultOverlay = document.getElementById('resultOverlay');
+    const resultLabel = document.getElementById('resultLabel');
+    const resultPoints = document.getElementById('resultPoints');
+    const resultMeta = document.getElementById('resultMeta');
+    const resultReasoning = document.getElementById('resultReasoning');
+    const confettiContainer = document.getElementById('confettiContainer');
+    const celebrationBanner = document.getElementById('celebrationBanner');
+    const celebrationBannerSub = document.getElementById('celebrationBannerSub');
+    const noRecyclableBanner = document.getElementById('noRecyclableBanner');
+
+    // --- Effets de célébration ---
+    const CONFETTI_COLORS = ['#00ff9d', '#ffd700', '#ff6b6b', '#00d8d8', '#c084fc', '#ffa500', '#ffffff'];
+
+    function launchConfetti(count = 90, durationMs = 4800) {
+        confettiContainer.innerHTML = '';
+        for (let i = 0; i < count; i++) {
+            const p = document.createElement('div');
+            p.className = 'confetti-piece';
+            p.style.left = (Math.random() * 100) + 'vw';
+            p.style.background = CONFETTI_COLORS[Math.floor(Math.random() * CONFETTI_COLORS.length)];
+            p.style.animationDuration = (2.2 + Math.random() * 2.4) + 's';
+            p.style.animationDelay = (Math.random() * 0.7) + 's';
+            p.style.width = (8 + Math.random() * 8) + 'px';
+            p.style.height = (10 + Math.random() * 10) + 'px';
+            confettiContainer.appendChild(p);
+        }
+        // Cleanup automatique pour ne pas laisser des éléments DOM mort dans la page
+        setTimeout(() => { confettiContainer.innerHTML = ''; }, durationMs);
+    }
+
+    function celebrateRecyclable(points) {
+        celebrationBannerSub.textContent = (points && points > 0) ? '+' + points + ' PTS' : 'RECYCLABLE';
+        // Reset puis ajout (pour relancer la transition même si on enchaîne les scans)
+        celebrationBanner.classList.remove('visible');
+        // Force reflow pour rejouer l'animation
+        void celebrationBanner.offsetWidth;
+        celebrationBanner.classList.add('visible');
+        launchConfetti();
+        if (navigator.vibrate) navigator.vibrate([80, 60, 80, 60, 200]);
+        // Bannière reste visible 2.2s, puis disparaît
+        setTimeout(() => celebrationBanner.classList.remove('visible'), 2200);
+    }
+
+    function celebrateNonRecyclable() {
+        noRecyclableBanner.classList.remove('visible');
+        void noRecyclableBanner.offsetWidth;
+        noRecyclableBanner.classList.add('visible');
+        if (navigator.vibrate) navigator.vibrate([150, 80, 150]);
+        setTimeout(() => noRecyclableBanner.classList.remove('visible'), 1800);
+    }
+
+    let videoTrack = null;
+    let torchOn = false;
+    let lastCapturedBlob = null;
+
+    // --- Caméra ---
+    async function initCamera() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    facingMode: { ideal: 'environment' },
+                    width:  { ideal: 1280 },
+                    height: { ideal: 720 },
+                },
+                audio: false,
+            });
+            video.srcObject = stream;
+            videoTrack = stream.getVideoTracks()[0];
+            await video.play();
+            captureBtn.disabled = false;
+            statusEl.textContent = '🟢 Prêt';
+
+            if (videoTrack && 'getCapabilities' in videoTrack) {
+                try {
+                    const caps = videoTrack.getCapabilities();
+                    if ('torch' in caps) flashBtn.classList.add('visible');
+                } catch (e) { /* pas de torch */ }
+            }
+        } catch (err) {
+            console.error('Caméra :', err);
+            statusEl.textContent = '❌ Caméra refusée';
+            alert("Accès caméra refusé. Vérifie les permissions du navigateur.");
+        }
+    }
+
+    // --- Flash ---
+    flashBtn.addEventListener('click', async () => {
+        if (!videoTrack) return;
+        torchOn = !torchOn;
+        try {
+            await videoTrack.applyConstraints({ advanced: [{ torch: torchOn }] });
+            flashBtn.classList.toggle('on', torchOn);
+        } catch (err) {
+            console.warn('Torch non supporté:', err);
+            flashBtn.classList.remove('visible');
+        }
+    });
+
+    // --- Socket.IO pour signaler la connexion au laptop ---
+    try {
+        const socket = io({ transports: ['websocket'], reconnection: true });
+        socket.on('connect', () => socket.emit('phone_connected', { ua: navigator.userAgent }));
+    } catch (e) { /* OK même sans socket */ }
+
+    // --- Capture : on prend la frame, on la resize si trop grosse, on retourne le Blob ---
+    function captureFrame() {
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        // Calcule le scale pour limiter le côté le plus long à MAX_UPLOAD_DIM
+        const scale = Math.min(1, MAX_UPLOAD_DIM / Math.max(vw, vh));
+        canvas.width = Math.round(vw * scale);
+        canvas.height = Math.round(vh * scale);
+        canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+        return new Promise(resolve => canvas.toBlob(b => resolve(b), 'image/jpeg', UPLOAD_QUALITY));
+    }
+
+    // --- États UI ---
+    function setState(state) {
+        // states: 'preview' (live cam + bouton scan), 'loading', 'result'
+        if (state === 'preview') {
+            captureBtn.classList.remove('hidden');
+            captureBtn.disabled = false;
+            newScanBtn.classList.remove('visible');
+            loadingOverlay.classList.remove('visible');
+            resultOverlay.classList.remove('visible', 'success', 'uncertain', 'error');
+            frozenImg.classList.remove('visible');
+            hint.classList.remove('hidden');
+            statusEl.textContent = '🟢 Prêt';
+        } else if (state === 'loading') {
+            captureBtn.classList.add('hidden');
+            captureBtn.disabled = true;
+            newScanBtn.classList.remove('visible');
+            loadingOverlay.classList.add('visible');
+            hint.classList.add('hidden');
+            statusEl.textContent = '🔄 Analyse...';
+        } else if (state === 'result') {
+            captureBtn.classList.add('hidden');
+            newScanBtn.classList.add('visible');
+            loadingOverlay.classList.remove('visible');
+            hint.classList.add('hidden');
+            statusEl.textContent = '✅ Résultat';
+        }
+    }
+
+    function showResult(data) {
+        resultOverlay.classList.remove('success', 'uncertain', 'error');
+        resultLabel.classList.remove('success', 'uncertain', 'error', 'neutral');
+
+        if (!data || data.error) {
+            resultOverlay.classList.add('error');
+            resultLabel.classList.add('error');
+            resultLabel.textContent = '❌ ' + (data?.error || 'Erreur');
+            resultMeta.textContent = '';
+            resultReasoning.textContent = '';
+            resultPoints.style.display = 'none';
+        } else if (!data.accepted) {
+            // Très basse confiance (< threshold serveur)
+            resultOverlay.classList.add('uncertain');
+            resultLabel.classList.add('uncertain');
+            resultLabel.textContent = '⚠️ Incertain';
+            resultMeta.textContent = data.hint || 'Reprends la photo';
+            resultReasoning.textContent = '';
+            resultPoints.style.display = 'none';
+        } else if (data.tri_status === 'RECYCLABLE') {
+            resultOverlay.classList.add('success');
+            resultLabel.classList.add('success');
+            resultLabel.textContent = '✅ ' + data.label;
+            resultMeta.textContent = 'Confiance ' + data.confidence;
+            if (data.points > 0) {
+                resultPoints.style.display = 'block';
+                resultPoints.textContent = '+' + data.points + ' pts';
+            } else {
+                resultPoints.style.display = 'none';
+            }
+        } else {
+            // Inconnu confiant : pas un déchet recyclable, mais Gemini est sûr
+            resultLabel.classList.add('neutral');
+            resultLabel.textContent = 'ℹ️ ' + data.label;
+            resultMeta.textContent = 'Confiance ' + data.confidence + ' · non recyclable';
+            resultPoints.style.display = 'none';
+        }
+
+        // Reasoning si fourni
+        const reasoning = (data.per_model_details && data.per_model_details[0] && data.per_model_details[0].reasoning) || '';
+        resultReasoning.textContent = reasoning ? '« ' + reasoning + ' »' : '';
+
+        resultOverlay.classList.add('visible');
+
+        // 🎉 Effets de célébration :
+        // - Recyclable accepté → confetti + "HOURRA !" + vibration courte pulsée
+        // - Non recyclable mais identifié → icône 🚫 + vibration plus lourde
+        // - Incertain ou erreur → pas d'effet
+        if (data && !data.error && data.accepted) {
+            if (data.tri_status === 'RECYCLABLE') {
+                celebrateRecyclable(data.points || 0);
+            } else {
+                celebrateNonRecyclable();
+            }
+        }
+    }
+
+    // --- Capture handler : freeze image, send, show result ---
+    captureBtn.addEventListener('click', async () => {
+        if (captureBtn.disabled) return;
+
+        // 1. Effet flash shutter
+        shutter.classList.add('flash');
+        setTimeout(() => shutter.classList.remove('flash'), 120);
+
+        // 2. Capture + freeze
+        const blob = await captureFrame();
+        if (!blob) {
+            alert('Erreur capture');
+            return;
+        }
+        lastCapturedBlob = blob;
+        const frozenUrl = URL.createObjectURL(blob);
+        frozenImg.src = frozenUrl;
+        frozenImg.classList.add('visible');
+
+        // 3. Loading state
+        setState('loading');
+
+        // 4. Envoi + résultat
+        try {
+            const formData = new FormData();
+            formData.append('image[]', blob, 'capture.jpg');
+            const t0 = performance.now();
+            const response = await fetch('/predict', {
+                method: 'POST',
+                headers: { 'X-API-Key': API_KEY },
+                body: formData,
+            });
+            const elapsed = Math.round(performance.now() - t0);
+            loadingText.textContent = `Analyse OK (${elapsed}ms)`;
+            const data = await response.json();
+            if (!response.ok) {
+                showResult({ error: data.error || ('HTTP ' + response.status) });
+            } else {
+                showResult(data);
+            }
+        } catch (err) {
+            console.error(err);
+            showResult({ error: 'Réseau' });
+        } finally {
+            setState('result');
+        }
+    });
+
+    // --- Bouton Nouveau scan : retour au mode preview ---
+    newScanBtn.addEventListener('click', () => {
+        if (frozenImg.src) {
+            URL.revokeObjectURL(frozenImg.src);
+            frozenImg.src = '';
+        }
+        lastCapturedBlob = null;
+        setState('preview');
+    });
+
+    initCamera();
+    </script>
+</body>
+</html>

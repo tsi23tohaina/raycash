@@ -1,4 +1,17 @@
 flask
 flask-cors
+flask-socketio
+flask-limiter
+flask-talisman
+python-dotenv
 pillow
 werkzeug
+numpy
+tensorflow
+requests
+qrcode[pil]
+google-genai>=2.0
+
+# Dev / tests (déplaçables vers un requirements-dev.txt plus tard)
+pytest
+pytest-cov

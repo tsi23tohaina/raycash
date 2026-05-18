@@ -2,11 +2,40 @@ name: Build Raycash APK
 
 on:
   push:
-    branches: [buildcheck] # Le build se lancera dès que tu "push" sur l'une de ces branches
+    branches: [buildcheck, main]
+  pull_request:
+    branches: [main]
 
 jobs:
-  build:
+  flutter-quality:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Analyze (static analysis + lints)
+        run: flutter analyze
+
+      - name: Run Flutter tests
+        run: flutter test
+
+  build-apk:
+    needs: flutter-quality
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/buildcheck' || github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
 
@@ -25,8 +54,7 @@ jobs:
         run: flutter pub get
 
       - name: Build APK
-        # On utilise --debug ici car c'est plus rapide pour un premier test en ligne
-        run: flutter build apk --release 
+        run: flutter build apk --release --dart-define=RAYCASH_API_KEY=${{ secrets.RAYCASH_API_KEY }}
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

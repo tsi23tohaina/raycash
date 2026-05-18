@@ -1,237 +1,156 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WebServer.h>
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
 #include <ESP32Servo.h>
+#include "secrets.h"
 
-// --- CONFIGURATION WI-FI ---
-const char* ssid = "DESKTOP-1T7GA6N 9411";
-const char* password = "sitraka12345";
+// --- CONFIGURATION WI-FI (cf. secrets.h) ---
+const char* ssid = WIFI_SSID;
+const char* password = WIFI_PASSWORD;
 
-// --- CONFIGURATION SERVEUR API (PC CENTRE) ---
-const char* serverUrl = "http://192.168.137.1:5000/esp_signal"; 
+// --- CONFIGURATION SERVEUR (cf. secrets.h) ---
+const char* serverUrl = SERVER_URL;
+const char* apiKey = RAYCASH_API_KEY;
 
-// --- CONFIGURATION DES BROCHES ---
-const int PIN_BOUTON = 4;    // Interrupteur ON/OFF général
-const int PIN_BUZZER = 18;   // Buzzer
-const int PIN_TRIG   = 5;    // HC-SR04 Trigger
-const int PIN_ECHO   = 19;   // HC-SR04 Echo
-const int PIN_IR     = 33;   // Capteur Infrarouge (Bac plein)
-const int PIN_SERVO  = 13;   // Servo Moteur
+// Définition des broches
+const int pinBouton = 4;
+const int pinBuzzer = 18;
+const int pinServo  = 19;
 
-// --- INITIALISATION DES OBJETS ---
-LiquidCrystal_I2C lcd(0x3F, 16, 2); 
-Servo triServo;
-WebServer server(80); 
-
-// --- VARIABLES DE CONFIGURATION ---
-const int ANGLE_NORMAL = 0;   
-const int ANGLE_TRI    = 180; 
-
-bool systemeActive = false;    // Géré par l'interrupteur PIN 4
+// Variables d'état
+int compteur = 0;
 bool dernierEtatBouton = HIGH;
 unsigned long dernierTempsDebounce = 0;
-const unsigned long delaiDebounce = 50;
+unsigned long delaiDebounce = 50;
 
-// Verrou réseau
-bool signalEnvoyeAuPC = false; 
+// Serveur HTTP local (port 80) pour recevoir les ordres /servo du serveur Flask.
+WebServer http(80);
+Servo trappe;
+
+// Position de repos / RECYCLABLE / INCONNU
+const int SERVO_REPOS      = 90;
+const int SERVO_RECYCLABLE = 180;
+const int SERVO_INCONNU    = 0;
+const unsigned long PIVOT_DELAY_MS = 1500;
 
 void setup() {
   Serial.begin(115200);
 
-  WiFi.disconnect(true);
-  delay(1000);
+  pinMode(pinBouton, INPUT_PULLUP);
+  pinMode(pinBuzzer, OUTPUT);
 
-  pinMode(PIN_BOUTON, INPUT_PULLUP); 
-  pinMode(PIN_BUZZER, OUTPUT);
-  pinMode(PIN_TRIG, OUTPUT);
-  pinMode(PIN_ECHO, INPUT);
-  pinMode(PIN_IR, INPUT);
+  trappe.attach(pinServo);
+  trappe.write(SERVO_REPOS);
 
-  triServo.attach(PIN_SERVO);
-  triServo.write(ANGLE_NORMAL); 
-
-  lcd.init();
-  lcd.backlight();
-  lcd.setCursor(0, 0);
-  lcd.print("ReyCash Init...");
-
+  // Connexion au Wi-Fi
   WiFi.begin(ssid, password);
-  Serial.print("Connexion au Wi-Fi ");
+  Serial.print("Connexion au Wi-Fi");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  
-  Serial.println("\n✅ Wi-Fi connecté !");
-  Serial.print("IP de l'ESP32 : ");
+  Serial.println("\nWi-Fi connecté !");
+  Serial.print("IP ESP32 : ");
   Serial.println(WiFi.localIP());
+  Serial.println("Système RecyCash prêt.");
 
-  server.on("/action", HTTP_POST, handlePCAction);
-  server.begin();
-  Serial.println("🌐 Serveur d'écoute local ESP32 prêt.");
-
-  lcd.clear();
+  // Routes du serveur HTTP local
+  http.on("/servo", HTTP_POST, handleServo);
+  http.on("/health", HTTP_GET, []() {
+    http.send(200, "application/json", "{\"status\":\"ok\"}");
+  });
+  http.onNotFound([]() {
+    http.send(404, "application/json", "{\"error\":\"not_found\"}");
+  });
+  http.begin();
 }
 
 void loop() {
-  server.handleClient(); // Écoute asynchrone du PC (Prioritaire pour recevoir RECYCLABLE/INCONNU)
-  
-  // 1. Logique de l'interrupteur ON/OFF général (Déclenchement immédiat)
-  int lectureBouton = digitalRead(PIN_BOUTON);
-  if (lectureBouton == LOW && dernierEtatBouton == HIGH && (millis() - dernierTempsDebounce) > delaiDebounce) {
+  http.handleClient();
+
+  int lecture = digitalRead(pinBouton);
+
+  if (lecture == LOW && dernierEtatBouton == HIGH && (millis() - dernierTempsDebounce) > delaiDebounce) {
+    compteur++;
     dernierTempsDebounce = millis();
-    systemeActive = !systemeActive; 
-    signalEnvoyeAuPC = false; // Reset immédiat du verrou réseau
-    
-    lcd.clear();
-    if (systemeActive) {
-      Serial.println("📢 Machine ACTIVÉE.");
-      tone(PIN_BUZZER, 1000, 150); 
-    } else {
-      Serial.println("💤 Machine en VEILLE FORCÉE.");
-      tone(PIN_BUZZER, 500, 300);  
-      triServo.write(ANGLE_NORMAL); // Sécurité : On referme immédiatement le servo
+
+    if (compteur == 1) {
+      Serial.println("Action: Démarrer");
+      jouerSon(1000, 500);
+      envoyerSignalAServeur("START");
+    }
+    else if (compteur == 2) {
+      Serial.println("Action: Arrêter");
+      jouerSon(500, 500);
+      envoyerSignalAServeur("STOP");
+      compteur = 0;
     }
   }
-  dernierEtatBouton = lectureBouton;
+  dernierEtatBouton = lecture;
+}
 
-  int etatIR = digitalRead(PIN_IR); 
+// Vérifie le header X-API-Key. Renvoie true si valide, sinon répond 401 directement.
+bool authentifierRequete() {
+  if (!http.hasHeader("X-API-Key") || http.header("X-API-Key") != String(apiKey)) {
+    http.send(401, "application/json", "{\"error\":\"unauthorized\"}");
+    return false;
+  }
+  return true;
+}
 
-  // 2. Traitement des capteurs uniquement SI la machine est active (ON)
-  if (systemeActive) {
-    float distance = mesurerDistance();
+// Reçoit l'ordre du serveur Flask après classification : RECYCLABLE / INCONNU.
+void handleServo() {
+  http.collectHeaders((const char*[]){"X-API-Key"}, 1);
+  if (!authentifierRequete()) return;
 
-    // Affichage moniteur série pour contrôle technique
-    Serial.print("Distance actuelle : ");
-    if (distance > 0) {
-      Serial.print(distance);
-      Serial.println(" cm");
-    } else {
-      Serial.println("Hors de portée");
-    }
+  String body = http.arg("plain");
+  body.trim();
+  Serial.print("Ordre servo reçu : ");
+  Serial.println(body);
 
-    // Logique de détection critique <= 10 cm
-    if (distance > 0 && distance <= 10.0) {
-      
-      // Affichage persistant pendant que l'objet reste devant
-      lcd.setCursor(0, 0);
-      lcd.print("DECHET DETECTER!"); 
-      lcd.setCursor(0, 1);
-      lcd.print("Dist: "); lcd.print(distance, 1); lcd.print(" cm    ");
-
-      // Envoi UNIQUE au PC Centre
-      if (!signalEnvoyeAuPC) {
-        Serial.println("🎯 Seuil atteint ! Envoi unique de BUTTON_CLICK...");
-        signalEnvoyeAuPC = true; 
-        envoyerSignalAServeur("BUTTON_CLICK"); 
-      }
-    } 
-    else {
-      // Si l'objet est retiré ou éloigné, et qu'on n'attend pas de réponse de l'IA, on réinitialise l'affichage
-      if (!signalEnvoyeAuPC) {
-        lcd.setCursor(0, 0);
-        lcd.print("ReyCash: PRÊT   ");
-        lcd.setCursor(0, 1);
-        lcd.print("Déposez un objet");
-      }
-    }
-  } 
-  else {
-    // Mode veille total (L'interrupteur est sur OFF) : Plus aucune lecture de distance n'est faite
-    lcd.setCursor(0, 0);
-    lcd.print("REYCASH DESACTIVE");
-    lcd.setCursor(0, 1);
-    if (etatIR == LOW) {
-      lcd.print("Statut:Bac Plein");
-    } else {
-      lcd.print("Statut: Bac OK  ");
-    }
+  if (body == "RECYCLABLE") {
+    trappe.write(SERVO_RECYCLABLE);
+  } else if (body == "INCONNU") {
+    trappe.write(SERVO_INCONNU);
+  } else {
+    http.send(400, "application/json", "{\"error\":\"action_invalide\"}");
+    return;
   }
 
-  delay(100); 
+  delay(PIVOT_DELAY_MS);
+  trappe.write(SERVO_REPOS);
+  http.send(200, "application/json", "{\"status\":\"done\"}");
 }
 
-float mesurerDistance() {
-  digitalWrite(PIN_TRIG, LOW);
-  delayMicroseconds(2);
-  digitalWrite(PIN_TRIG, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(PIN_TRIG, LOW);
-
-  long duree = pulseIn(PIN_ECHO, HIGH, 25000); 
-  if (duree == 0) return -1;
-  return duree * 0.034 / 2;
-}
-
+// Fonction pour communiquer avec Flask
 void envoyerSignalAServeur(String action) {
   if (WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
-    http.begin(serverUrl);
-    http.setTimeout(2000); 
-    http.addHeader("Content-Type", "application/json");
+    HTTPClient client;
+
+    client.begin(serverUrl);
+    client.addHeader("Content-Type", "application/json");
+    client.addHeader("X-API-Key", apiKey);
+
     String jsonPayload = "{\"action\":\"" + action + "\"}";
-    
-    int httpResponseCode = http.POST(jsonPayload);
-    Serial.print("-> Code HTTP PC : ");
-    Serial.println(httpResponseCode);
-    
-    http.end();
+
+    int httpResponseCode = client.POST(jsonPayload);
+
+    if (httpResponseCode > 0) {
+      Serial.print("Réponse serveur : ");
+      Serial.println(httpResponseCode);
+    } else {
+      Serial.print("Erreur d'envoi : ");
+      Serial.println(httpResponseCode);
+    }
+
+    client.end();
+  } else {
+    Serial.println("Erreur : Wi-Fi déconnecté");
   }
 }
 
-// Réception des ordres de décision du PC Centre
-void handlePCAction() {
-  if (server.hasArg("plain")) {
-    String commande = server.arg("plain");
-    Serial.println("\n📥 [API RECEIVE] Ordre du PC : " + commande);
-    
-    // Si l'interrupteur a coupé la machine entre-temps, on ignore l'ordre du PC
-    if (!systemeActive) {
-      server.send(200, "application/json", "{\"status\":\"ignored_system_off\"}");
-      return;
-    }
-    
-    if (commande == "BEEP_START") {
-      tone(PIN_BUZZER, 1200, 250); 
-    } 
-    else if (commande == "RECYCLABLE") {
-      // Déchet validé !
-      tone(PIN_BUZZER, 2000, 120); delay(150);
-      tone(PIN_BUZZER, 2000, 120);
-      
-      // AJOUT LOGIQUE DU TICKET CLIENT SUR LE LCD
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("DECHET ACCEPTE !");
-      lcd.setCursor(0, 1);
-      lcd.print("TICKET CLIENT..."); // Écrit le statut du ticket demandé
-      
-      // Rotation du servo pour trier le déchet
-      triServo.write(ANGLE_TRI);    
-      delay(4000); // Laisse glisser l'objet pendant 4 secondes
-      
-      triServo.write(ANGLE_NORMAL); // Reset du servo
-      delay(500);
-      
-      lcd.clear();
-      signalEnvoyeAuPC = false; // Libère le verrou, prêt pour le déchet suivant !
-    } 
-    else if (commande == "INCONNU") {
-      // Déchet refusé
-      tone(PIN_BUZZER, 350, 800); 
-      
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("DECHET INCONNU !");
-      lcd.setCursor(0, 1);
-      lcd.print("Pas de ticket   ");
-      
-      delay(3500); 
-      lcd.clear();
-      signalEnvoyeAuPC = false; // Libère le verrou
-    }
-    server.send(200, "application/json", "{\"status\":\"processed\"}");
-  }
+void jouerSon(int frequence, int duree) {
+  tone(pinBuzzer, frequence);
+  delay(duree);
+  noTone(pinBuzzer);
 }

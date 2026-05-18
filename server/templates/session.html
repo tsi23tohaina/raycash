@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>RayCash · Session</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0f1115;
+            color: #fff;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .topbar {
+            background: linear-gradient(135deg, #008080, #00a8a8);
+            padding: 18px 32px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        }
+        .brand { font-size: 24px; font-weight: 800; letter-spacing: 1px; }
+        .phone-badge {
+            background: rgba(255,255,255,0.15);
+            padding: 6px 14px;
+            border-radius: 18px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .phone-badge.online { background: rgba(0,216,142,0.25); border: 1px solid #00d88e; }
+
+        /* Stats top */
+        .summary {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            padding: 24px 32px;
+        }
+        .stat {
+            background: linear-gradient(135deg, #1a1d24, #242830);
+            padding: 20px 24px;
+            border-radius: 16px;
+            border: 1px solid #2a2f3a;
+            text-align: center;
+        }
+        .stat-label {
+            font-size: 11px;
+            color: #888;
+            letter-spacing: 1.5px;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+        .stat-value { font-size: 38px; font-weight: 800; line-height: 1; }
+        .stat.points .stat-value {
+            background: linear-gradient(135deg, #ffd700, #ffaa00);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .stat.recyclable .stat-value { color: #00d88e; }
+        .stat.objects .stat-value { color: #00d8d8; }
+        .stat.accuracy .stat-value { color: #c084fc; }
+        .stat.accuracy .stat-sub { font-size: 11px; color: #888; margin-top: 4px; }
+
+        /* Last scan large display */
+        .last-scan-wrap {
+            padding: 0 32px 24px;
+        }
+        .last-scan {
+            display: none;
+            background: linear-gradient(135deg, #1a1d24, #242830);
+            border-radius: 24px;
+            padding: 28px;
+            border: 2px solid #2a2f3a;
+            animation: pop 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .last-scan.visible { display: block; }
+        .last-scan.recyclable { border-color: #00a86b; }
+        .last-scan.uncertain  { border-color: #ffa500; }
+        .last-scan.unknown    { border-color: #555; }
+        @keyframes pop {
+            from { opacity: 0; transform: scale(0.95); }
+            to   { opacity: 1; transform: scale(1); }
+        }
+        .last-scan-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-bottom: 16px;
+        }
+        .last-scan-title {
+            color: #888;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            font-weight: 600;
+        }
+        .last-scan-time { color: #555; font-size: 12px; }
+        .last-scan-body {
+            display: grid;
+            grid-template-columns: 1fr 1.5fr;
+            gap: 32px;
+            align-items: center;
+        }
+        .last-scan-verdict {
+            text-align: center;
+            padding: 16px;
+        }
+        .last-scan-label {
+            font-size: 48px;
+            font-weight: 800;
+            margin-bottom: 8px;
+        }
+        .last-scan.recyclable .last-scan-label { color: #00d88e; }
+        .last-scan.uncertain  .last-scan-label { color: #ffa500; }
+        .last-scan.unknown    .last-scan-label { color: #aaa; }
+        .last-scan-confidence {
+            font-size: 14px;
+            color: #888;
+            margin-bottom: 14px;
+        }
+        .last-scan-points {
+            font-size: 36px;
+            font-weight: 800;
+            background: linear-gradient(135deg, #ffd700, #ffaa00);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        /* Per-model breakdown */
+        .models-breakdown {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .models-title {
+            color: #888;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        .model-row {
+            display: grid;
+            grid-template-columns: 160px 1fr 80px;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 12px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 10px;
+        }
+        .model-row.agrees {
+            background: rgba(0,216,142,0.08);
+        }
+        .model-row.disagrees {
+            background: rgba(255,107,107,0.08);
+        }
+        .model-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: #ddd;
+        }
+        .model-pred {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .model-pred-label {
+            font-size: 13px;
+            font-weight: 700;
+            color: #fff;
+            white-space: nowrap;
+        }
+        .model-pred-bar {
+            flex: 1;
+            height: 8px;
+            background: rgba(255,255,255,0.08);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .model-pred-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00a8a8, #00d8d8);
+            transition: width 0.4s;
+        }
+        .model-row.disagrees .model-pred-fill {
+            background: linear-gradient(90deg, #d96c6c, #ff8c8c);
+        }
+        .model-score {
+            text-align: right;
+            font-size: 13px;
+            font-family: 'Courier New', monospace;
+            font-weight: 700;
+            color: #00d8d8;
+        }
+        .model-row.disagrees .model-score { color: #ff8c8c; }
+
+        /* Top-3 predictions */
+        .top-preds {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+            flex-wrap: wrap;
+        }
+        .top-pred-pill {
+            background: rgba(255,255,255,0.06);
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 11px;
+            color: #aaa;
+        }
+        .top-pred-pill:first-child {
+            background: rgba(0,216,142,0.2);
+            color: #00d88e;
+            font-weight: 700;
+        }
+
+        /* Historique grid */
+        .scans-wrap { flex: 1; padding: 0 32px 40px; }
+        .scans-title {
+            font-size: 14px;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            font-weight: 600;
+            margin-bottom: 12px;
+        }
+        .scans-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 12px;
+        }
+        .scan-card {
+            background: #1a1d24;
+            border-radius: 12px;
+            padding: 14px;
+            border: 1px solid #2a2f3a;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            animation: slideIn 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(10px) scale(0.97); }
+            to   { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .scan-card.recyclable { border-color: #00a86b; }
+        .scan-card.unknown    { border-color: #555; }
+        .scan-card-label {
+            font-size: 18px;
+            font-weight: 700;
+        }
+        .scan-card.recyclable .scan-card-label { color: #00d88e; }
+        .scan-card.unknown    .scan-card-label { color: #aaa; }
+        .scan-card-meta { font-size: 11px; color: #888; }
+        .scan-card-points { font-size: 16px; font-weight: 800; color: #ffd700; }
+
+        .empty {
+            text-align: center;
+            color: #555;
+            padding: 80px 20px;
+            font-size: 15px;
+            grid-column: 1 / -1;
+        }
+        .empty-emoji { font-size: 64px; margin-bottom: 12px; }
+
+        .footer {
+            text-align: center;
+            padding: 12px;
+            color: #444;
+            font-size: 11px;
+            border-top: 1px solid #1a1d24;
+        }
+        .live-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background: #00d88e;
+            border-radius: 50%;
+            margin-right: 6px;
+            animation: blink 1.5s ease-in-out infinite;
+        }
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50%      { opacity: 0.3; }
+        }
+    </style>
+</head>
+<body>
+    <div class="topbar">
+        <div class="brand">🌀 RayCash · Session</div>
+        <div class="phone-badge online" id="phoneBadge">
+            <span class="live-indicator"></span>📱 Scanner connecté
+        </div>
+    </div>
+
+    <div class="summary">
+        <div class="stat objects">
+            <div class="stat-label">Objets scannés</div>
+            <div class="stat-value" id="statObjects">0</div>
+        </div>
+        <div class="stat recyclable">
+            <div class="stat-label">Recyclables</div>
+            <div class="stat-value" id="statRecyclable">0</div>
+        </div>
+        <div class="stat points">
+            <div class="stat-label">Total points</div>
+            <div class="stat-value" id="statPoints">0</div>
+        </div>
+        <div class="stat accuracy">
+            <div class="stat-label">Précision modèle</div>
+            <div class="stat-value" id="statAccuracy">—</div>
+            <div class="stat-sub" id="statAccuracySub">référence</div>
+        </div>
+    </div>
+
+    <div class="last-scan-wrap">
+        <div class="last-scan" id="lastScan">
+            <div class="last-scan-header">
+                <div class="last-scan-title" id="lastScanHeaderTitle">DERNIER SCAN</div>
+                <div class="last-scan-time" id="lastScanTime"></div>
+            </div>
+            <div class="last-scan-body">
+                <div class="last-scan-verdict">
+                    <div class="last-scan-label" id="lastScanLabel">—</div>
+                    <div class="last-scan-confidence" id="lastScanConfidence"></div>
+                    <div class="last-scan-points" id="lastScanPoints"></div>
+                    <div class="top-preds" id="lastScanTopPreds"></div>
+                </div>
+                <div class="models-breakdown">
+                    <div class="models-title" id="modelsTitle">DÉTAIL MODÈLE</div>
+                    <div id="modelsRows"></div>
+                    <div id="modelReasoning" style="margin-top:10px;font-size:12px;color:#aaa;font-style:italic;line-height:1.4;"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="scans-wrap">
+        <div class="scans-title"><span class="live-indicator"></span>HISTORIQUE LIVE</div>
+        <div class="scans-grid" id="scansGrid">
+            <div class="empty" id="empty">
+                <div class="empty-emoji">📸</div>
+                <div>En attente du premier scan...</div>
+                <div style="margin-top:8px;color:#666;font-size:13px;">
+                    Scanne un déchet avec ton téléphone, le résultat apparaît ici en direct.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer" id="footer">RayCash Pro · Chargement…</div>
+
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script>
+    const statObjects = document.getElementById('statObjects');
+    const statRecyclable = document.getElementById('statRecyclable');
+    const statPoints = document.getElementById('statPoints');
+    const statAccuracy = document.getElementById('statAccuracy');
+    const statAccuracySub = document.getElementById('statAccuracySub');
+    const scansGrid = document.getElementById('scansGrid');
+    const empty = document.getElementById('empty');
+    const phoneBadge = document.getElementById('phoneBadge');
+    const footer = document.getElementById('footer');
+    // Last-scan elements
+    const lastScan = document.getElementById('lastScan');
+    const lastScanLabel = document.getElementById('lastScanLabel');
+    const lastScanConfidence = document.getElementById('lastScanConfidence');
+    const lastScanPoints = document.getElementById('lastScanPoints');
+    const lastScanTime = document.getElementById('lastScanTime');
+    const lastScanTopPreds = document.getElementById('lastScanTopPreds');
+    const modelsRows = document.getElementById('modelsRows');
+    const lastScanHeaderTitle = document.getElementById('lastScanHeaderTitle');
+    const modelsTitle = document.getElementById('modelsTitle');
+    const modelReasoning = document.getElementById('modelReasoning');
+
+    // Détecte si le backend renvoie 1 ou plusieurs modèles (ex: Gemini = 1, Ensemble V4 = 3)
+    // et ajuste le wording de l'UI en conséquence.
+    function isCloudModel(name) {
+        // Détecte les backends "cloud" (LLM externe vs TFLite local).
+        // On garde les noms internes connus (au cas où DISPLAY_NAME serait modifié)
+        // + le suffixe "Vision AI" qu'on expose côté UI.
+        return /gemini|gpt|claude|llama|groq|vision ai|cloud ai/i.test(name || '');
+    }
+
+    let totals = { objects: 0, recyclable: 0, points: 0 };
+
+    function updateTotals() {
+        statObjects.textContent = totals.objects;
+        statRecyclable.textContent = totals.recyclable;
+        statPoints.textContent = totals.points;
+    }
+
+    function fmtTime(d) {
+        const pad = n => String(n).padStart(2, '0');
+        return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+    }
+
+    function showLastScan(data) {
+        // Reset state
+        lastScan.classList.remove('recyclable', 'uncertain', 'unknown');
+        let kind = 'unknown';
+        if (data.uncertain || !data.accepted) kind = 'uncertain';
+        else if (data.tri_status === 'RECYCLABLE') kind = 'recyclable';
+        else kind = 'unknown';
+        lastScan.classList.add(kind);
+
+        // Wording dynamique : "ensemble" si plusieurs modèles, sinon nom du modèle
+        const meta = data.ensemble_metadata || {};
+        const nModels = meta.n_models || (data.per_model_details ? data.per_model_details.length : 1);
+        const isEnsemble = nModels > 1;
+        const firstModelName = (meta.model_names && meta.model_names[0]) || '';
+
+        lastScanLabel.textContent = data.label || 'Inconnu';
+        const labelSource = isEnsemble
+            ? `ensemble (${nModels} modèles)`
+            : (firstModelName || 'modèle');
+        lastScanConfidence.textContent = `Confiance ${labelSource} · ${data.confidence} · ${data.n_views || 1} vue${(data.n_views || 1) > 1 ? 's' : ''}`;
+        lastScanPoints.textContent = (data.points || 0) > 0 ? '+' + data.points + ' pts' : '';
+        lastScanTime.textContent = fmtTime(new Date());
+
+        // Titre du bloc détail (gauche)
+        lastScanHeaderTitle.textContent = isEnsemble
+            ? `DERNIER SCAN — DÉTAIL ENSEMBLE`
+            : `DERNIER SCAN — ${firstModelName.toUpperCase() || 'MODÈLE'}`;
+        modelsTitle.textContent = isEnsemble ? 'VOTE DE CHAQUE MODÈLE' : 'RÉSULTAT MODÈLE';
+
+        // Top-3 predictions
+        lastScanTopPreds.innerHTML = '';
+        if (Array.isArray(data.top_predictions) && data.top_predictions.length > 0) {
+            data.top_predictions.forEach(p => {
+                const pill = document.createElement('div');
+                pill.className = 'top-pred-pill';
+                pill.textContent = p.label + ' ' + (p.score * 100).toFixed(1) + '%';
+                lastScanTopPreds.appendChild(pill);
+            });
+        }
+
+        // Per-model breakdown
+        modelsRows.innerHTML = '';
+        modelReasoning.textContent = '';
+        const consensusLabel = data.label;
+        if (Array.isArray(data.per_model_details)) {
+            data.per_model_details.forEach(m => {
+                const row = document.createElement('div');
+                const agrees = (m.label === consensusLabel) && data.accepted;
+                // En single-model, pas de notion d'accord/désaccord — on neutralise.
+                const rowClass = isEnsemble
+                    ? (agrees ? 'agrees' : (!data.accepted ? '' : 'disagrees'))
+                    : '';
+                row.className = 'model-row ' + rowClass;
+                const pct = (m.score * 100).toFixed(1);
+                row.innerHTML = `
+                    <div class="model-name">${escapeHtml(m.name)}</div>
+                    <div class="model-pred">
+                        <span class="model-pred-label">${escapeHtml(m.label)}</span>
+                        <div class="model-pred-bar"><div class="model-pred-fill" style="width:${pct}%"></div></div>
+                    </div>
+                    <div class="model-score">${pct}%</div>
+                `;
+                modelsRows.appendChild(row);
+                // Affiche le reasoning si fourni (LLM cloud essentiellement)
+                if (m.reasoning) {
+                    modelReasoning.textContent = '« ' + m.reasoning + ' »';
+                }
+            });
+        }
+
+        lastScan.classList.add('visible');
+    }
+
+    function addScan(data) {
+        // Last scan en gros
+        showLastScan(data);
+
+        // Update totaux
+        totals.objects += 1;
+        const isRecyclable = (data.tri_status === 'RECYCLABLE') && data.accepted !== false;
+        if (isRecyclable) {
+            totals.recyclable += 1;
+            totals.points += (data.points || 0);
+        }
+        updateTotals();
+
+        // Footer + stat précision : adapté au backend.
+        if (data.ensemble_metadata) {
+            const m = data.ensemble_metadata;
+            const nModels = m.n_models || 1;
+            const firstName = (m.model_names && m.model_names[0]) || '';
+            const isEnsemble = nModels > 1;
+            const isCloud = isCloudModel(firstName);
+
+            if (isEnsemble) {
+                statAccuracy.textContent = (m.global_accuracy * 100).toFixed(2) + '%';
+                statAccuracySub.textContent = `${nModels} modèles · seuil ${(m.thresholds.min_confidence * 100).toFixed(0)}%`;
+                footer.textContent = `RayCash Pro · Ensemble : ${m.model_names.join(' + ')} · Précision test ${(m.global_accuracy*100).toFixed(2)}%`;
+            } else if (isCloud) {
+                // Cloud model : pas de "accuracy" mesurée, on affiche le nom du modèle
+                statAccuracy.textContent = 'Cloud';
+                statAccuracySub.textContent = firstName || 'service externe';
+                footer.textContent = `RayCash Pro · Modèle : ${firstName} · Inférence cloud temps réel`;
+            } else {
+                // Single TFLite local
+                statAccuracy.textContent = (m.global_accuracy * 100).toFixed(2) + '%';
+                statAccuracySub.textContent = `1 modèle local · seuil ${(m.thresholds.min_confidence * 100).toFixed(0)}%`;
+                footer.textContent = `RayCash Pro · Modèle local${firstName ? ' : ' + firstName : ''} · Précision test ${(m.global_accuracy*100).toFixed(2)}%`;
+            }
+        }
+
+        // Petite carte dans l'historique
+        if (empty.parentElement) empty.remove();
+        const card = document.createElement('div');
+        card.className = 'scan-card ' + (isRecyclable ? 'recyclable' : 'unknown');
+        card.innerHTML = `
+            <div class="scan-card-label">${escapeHtml(data.label || 'Inconnu')}</div>
+            <div class="scan-card-meta">${escapeHtml(data.confidence || '?')}</div>
+            <div class="scan-card-points">${isRecyclable ? '+' + (data.points || 0) + ' pts' : '—'}</div>
+        `;
+        scansGrid.prepend(card);
+    }
+
+    function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, c => ({
+            '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+        }[c]));
+    }
+
+    // Socket.IO
+    const socket = io({ transports: ['websocket'], reconnection: true });
+    socket.on('connect', () => console.log('Session connectée'));
+    socket.on('new_scan', (data) => {
+        console.log('Nouveau scan :', data);
+        addScan(data);
+    });
+    socket.on('phone_connected', () => {
+        phoneBadge.classList.add('online');
+        phoneBadge.innerHTML = '<span class="live-indicator"></span>📱 Scanner connecté';
+    });
+    socket.on('phone_disconnected', () => {
+        phoneBadge.classList.remove('online');
+        phoneBadge.innerHTML = '📱 Scanner déconnecté';
+    });
+    </script>
+</body>
+</html>
