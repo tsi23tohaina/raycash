@@ -262,6 +262,19 @@
             border-radius: 8px;
             background: #0a0a0a;
             margin-bottom: 4px;
+            display: block;
+        }
+        .scan-card-img-placeholder {
+            width: 100%;
+            aspect-ratio: 1 / 1;
+            border-radius: 8px;
+            background: linear-gradient(135deg, #0a0a0a, #1a1d24);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 32px;
+            color: #2a2f3a;
+            margin-bottom: 4px;
         }
         @keyframes slideIn {
             from { opacity: 0; transform: translateY(10px) scale(0.97); }
@@ -424,6 +437,15 @@
         statPoints.textContent = totals.points;
     }
 
+    // Formate la confiance pour affichage : accepte soit une string "75.0%"
+    // (format envoye en live par new_scan), soit un float 0.75 (format DB
+    // renvoye par /scans). Retourne toujours une string "%".
+    function fmtConfidence(c) {
+        if (c == null) return '?';
+        if (typeof c === 'string') return c.endsWith('%') ? c : (c + '%');
+        return (c * 100).toFixed(1) + '%';
+    }
+
     // Normalise un label LLM en libelle UI : "Inconnu" devient "Non recyclable"
     // (un dechet que l'IA ne classe pas dans une categorie connue n'est pas
     // recyclable du point de vue de la machine).
@@ -462,7 +484,7 @@
         const labelSource = isEnsemble
             ? `ensemble (${nModels} modèles)`
             : (firstModelName || 'modèle');
-        lastScanConfidence.textContent = `Confiance ${labelSource} · ${data.confidence} · ${data.n_views || 1} vue${(data.n_views || 1) > 1 ? 's' : ''}`;
+        lastScanConfidence.textContent = `Confiance ${labelSource} · ${fmtConfidence(data.confidence)} · ${data.n_views || 1} vue${(data.n_views || 1) > 1 ? 's' : ''}`;
         lastScanPoints.textContent = (data.points || 0) > 0 ? '+' + data.points + ' pts' : '';
         lastScanTime.textContent = fmtTime(new Date());
 
@@ -558,18 +580,24 @@
             }
         }
 
-        // Petite carte dans l'historique avec miniature photo si dispo.
+        // Petite carte dans l'historique avec miniature photo (toujours visible :
+        // image reelle si dispo, sinon placeholder camera). C'est l'historique
+        // live qui doit montrer TOUTES les photos de la session, pas seulement
+        // les labels.
         if (empty.parentElement) empty.remove();
         const card = document.createElement('div');
         card.className = 'scan-card ' + (isRecyclable ? 'recyclable' : 'unknown');
         const cardImgPath = data.image_url || (data.image_urls && data.image_urls[0]) || '';
-        const cardImg = cardImgPath
-            ? `<img src="${cardImgPath}${cardImgPath.includes('?') ? '&' : '?'}key=${encodeURIComponent(API_KEY)}" alt="" style="width:100%;height:80px;object-fit:cover;border-radius:6px;margin-bottom:6px;">`
+        const cardImgSrc = cardImgPath
+            ? cardImgPath + (cardImgPath.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(API_KEY)
             : '';
+        const cardImg = cardImgSrc
+            ? `<img class="scan-card-img" src="${cardImgSrc}" alt="${escapeHtml(displayLabel(data.label, data.tri_status))}" loading="lazy">`
+            : `<div class="scan-card-img-placeholder">📷</div>`;
         card.innerHTML = `
             ${cardImg}
             <div class="scan-card-label">${escapeHtml(displayLabel(data.label, data.tri_status))}</div>
-            <div class="scan-card-meta">${escapeHtml(data.confidence || '?')}</div>
+            <div class="scan-card-meta">${escapeHtml(fmtConfidence(data.confidence))}</div>
             <div class="scan-card-points">${isRecyclable ? '+' + (data.points || 0) + ' pts' : '—'}</div>
         `;
         scansGrid.prepend(card);
@@ -580,6 +608,27 @@
             '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
         }[c]));
     }
+
+    // Pre-charge les N derniers scans depuis la DB serveur au boot de la page.
+    // Permet d'afficher l'historique meme apres un refresh (sinon on perdait
+    // tous les scans precedents et le grid demarrait vide).
+    async function loadHistory(limit = 50) {
+        try {
+            const r = await fetch('/scans?limit=' + limit, {
+                headers: { 'X-API-Key': API_KEY }
+            });
+            if (!r.ok) return;
+            const data = await r.json();
+            const items = Array.isArray(data.items) ? data.items : [];
+            // /scans renvoie du plus recent au plus ancien. addScan prepend
+            // donc on itere en sens inverse pour que le plus recent finisse
+            // en tete de grid (et soit la "DERNIER SCAN" affichee).
+            for (let i = items.length - 1; i >= 0; i--) {
+                addScan(items[i]);
+            }
+        } catch (e) { console.warn('loadHistory:', e); }
+    }
+    loadHistory();
 
     // Socket.IO
     const socket = io({ transports: ['websocket'], reconnection: true });
