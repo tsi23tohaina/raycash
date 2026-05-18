@@ -429,10 +429,25 @@
             captureBtn.disabled = false;
             statusEl.textContent = '🟢 Prêt';
 
+            // Torch allume en permanence : indispensable pour une bonne photo
+            // d'un dechet au fond de la poubelle (souvent peu eclaire). Sur
+            // Chrome Android, applyConstraints({torch:true}) marche immediatement
+            // apres video.play(). Sur iOS Safari (pas de support torch), le
+            // bloc echoue silencieusement, on retombe sur le bouton manuel.
             if (videoTrack && 'getCapabilities' in videoTrack) {
                 try {
                     const caps = videoTrack.getCapabilities();
-                    if ('torch' in caps) flashBtn.classList.add('visible');
+                    if ('torch' in caps) {
+                        try {
+                            await videoTrack.applyConstraints({ advanced: [{ torch: true }] });
+                            torchOn = true;
+                            flashBtn.classList.add('visible', 'on');
+                        } catch (e) {
+                            // L'auto-activation a echoue : on affiche le bouton
+                            // pour permettre une activation manuelle (1 tap).
+                            flashBtn.classList.add('visible');
+                        }
+                    }
                 } catch (e) { /* pas de torch */ }
             }
         } catch (err) {
@@ -455,20 +470,42 @@
         }
     });
 
+    // Delai entre la detection HC-SR04 et la capture photo. Laisse le temps
+    // au dechet de tomber au fond de la poubelle (sinon on capture juste un
+    // objet en chute libre, flou et hors champ).
+    const CAPTURE_DELAY_MS = 2500;
+    const HINT_DEFAULT = "En attente d'un objet sur la machine...";
+
     // --- Socket.IO ---
     // 1. Signale la connexion au laptop (-> /pair redirige vers /session)
     // 2. Ecoute "command_from_esp" : l'ESP32 a detecte un objet via HC-SR04
     //    et a envoye POST /esp_signal action=START. Le serveur broadcast a
-    //    tous les clients. On declenche alors la capture automatiquement,
-    //    seulement si on est en mode preview (pas pendant une analyse en cours).
+    //    tous les clients. On attend CAPTURE_DELAY_MS puis on capture.
     try {
         const socket = io({ transports: ['websocket'], reconnection: true });
         socket.on('connect', () => socket.emit('phone_connected', { ua: navigator.userAgent }));
         socket.on('command_from_esp', (msg) => {
             if (!msg || msg.action !== 'START') return;
             if (captureBtn.disabled) return; // analyse deja en cours ou ecran resultat
-            console.log('[ESP32] START recu -> capture auto');
-            captureBtn.click(); // reutilise le flow existant (flash + freeze + /predict)
+            console.log('[ESP32] START recu -> countdown', CAPTURE_DELAY_MS, 'ms');
+            // Bloque les START successifs pendant le countdown.
+            captureBtn.disabled = true;
+
+            const t0 = Date.now();
+            const tick = () => {
+                const remaining = CAPTURE_DELAY_MS - (Date.now() - t0);
+                if (remaining > 0) {
+                    hint.textContent = 'Capture dans ' + (remaining / 1000).toFixed(1) + 's...';
+                    setTimeout(tick, 100);
+                } else {
+                    hint.textContent = HINT_DEFAULT;
+                    // Re-enable juste avant le click (le handler verifie disabled).
+                    // setState('loading') le re-disable immediatement.
+                    captureBtn.disabled = false;
+                    captureBtn.click();
+                }
+            };
+            tick();
         });
     } catch (e) { /* OK même sans socket */ }
 
@@ -496,6 +533,7 @@
             loadingOverlay.classList.remove('visible');
             resultOverlay.classList.remove('visible', 'success', 'uncertain', 'error');
             frozenImg.classList.remove('visible');
+            hint.textContent = HINT_DEFAULT; // reset (au cas ou interrompu pendant countdown)
             hint.classList.remove('hidden');
             statusEl.textContent = '🟢 En attente';
         } else if (state === 'loading') {
