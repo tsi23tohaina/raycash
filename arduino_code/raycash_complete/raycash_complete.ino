@@ -1,17 +1,4 @@
-// raycash_complete.ino -- firmware merge :
-//   - Capteurs HC-SR04 (proximite) + IR (bac plein) + LCD I2C (du nouveau sketch)
-//   - Securite X-API-Key + HMAC-SHA256 + NTP (compat server/.env actuel)
-//   - Robustesse : timeout Wi-Fi, reconnexion auto, etat machine non-bloquant,
-//                  timeout du verrou si serveur ne repond pas
-//
-// PRE-REQUIS (Arduino IDE / Manage Libraries) :
-//   - ESP32Servo (Kevin Harrington)
-//   - LiquidCrystal_I2C (Frank de Brabander / Marco Schwartz)
-//   - WiFi, HTTPClient, WebServer, Wire : fournis par le board package esp32
-//   - mbedtls/md.h : fourni par le board package esp32 (HMAC-SHA256 hardware)
-//
-// CONFIG : copie secrets.h.example -> secrets.h et remplis.
-
+// raycash_complete.ino -- version stable avec validation temporelle ultrason
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WebServer.h>
@@ -23,42 +10,44 @@
 #include "secrets.h"
 
 // =============================================================================
-//                         CONFIGURATION (pins inchangees)
+//                         CONFIGURATION
 // =============================================================================
-const int PIN_BOUTON = 4;    // Interrupteur ON/OFF
+const int PIN_BOUTON = 4;
 const int PIN_BUZZER = 18;
-const int PIN_TRIG   = 5;    // HC-SR04
-const int PIN_ECHO   = 19;   // HC-SR04
-const int PIN_IR     = 33;   // bac plein
+const int PIN_TRIG   = 5;
+const int PIN_ECHO   = 19;
+const int PIN_IR     = 33;
 const int PIN_SERVO  = 13;
 
-const int ANGLE_REPOS      = 90;
-const int ANGLE_RECYCLABLE = 180;
-const int ANGLE_NON_RECYCLABLE    = 0;
+const int ANGLE_REPOS           = 90;
+const int ANGLE_RECYCLABLE      = 0;
+const int ANGLE_NON_RECYCLABLE  = 180;
 
-const float DISTANCE_SEUIL_CM   = 15.0;
+const float DISTANCE_SEUIL_CM   = 15.0;   // seuil de détection
 const unsigned long DEBOUNCE_MS = 50;
-const unsigned long TRI_DUREE_MS         = 2000;  // duree position servo (laisse tomber le dechet)
-const unsigned long TRI_RETOUR_MS        =  500;  // pause avant retour repos
-const unsigned long VERROU_TIMEOUT_MS    = 15000; // libere verrou si serveur muet
-const unsigned long WIFI_TIMEOUT_MS      = 20000; // setup : timeout Wi-Fi
-const unsigned long WIFI_RECHECK_MS      =  5000; // loop : reconnexion auto
-const unsigned long DISTANCE_INTERVAL_MS =  100;  // throttle HC-SR04
-const unsigned long LCD_REFRESH_MS       =  500;
+const unsigned long TRI_DUREE_MS         = 2000;
+const unsigned long TRI_RETOUR_MS        = 500;
+const unsigned long VERROU_TIMEOUT_MS    = 15000;
+const unsigned long WIFI_TIMEOUT_MS      = 20000;
+const unsigned long WIFI_RECHECK_MS      = 5000;
+const unsigned long DISTANCE_INTERVAL_MS = 100;   // intervalle entre mesures
+const unsigned long LCD_REFRESH_MS       = 500;
+
+// NOUVEAUX PARAMÈTRES TEMPORELS POUR L'ULTRASON
+const unsigned long DELAI_CONFIRMATION_MS = 300;   // temps que l'objet doit rester sous seuil
+const unsigned long DELAI_REARMEMENT_MS   = 500;   // temps d'absence avant réarmement
 
 const char* NTP_SERVER = "pool.ntp.org";
 
 // =============================================================================
 //                                 OBJETS GLOBAUX
 // =============================================================================
-// Adresse I2C resolue au boot (auto-detect entre 0x27 et 0x3F). On instancie
-// On instancie 2 LCD statiques (0x27 et 0x3F, les 2 adresses les plus communes
-// pour les modules PCF8574). initLcd() scanne l'I2C au boot et fait pointer
-// `lcd` vers celui qui repond. Si aucun ne repond, le pointeur reste sur lcd27
-// et les calls sont silencieux (pas de plantage).
-LiquidCrystal_I2C lcd27(0x27, 16, 2);
-LiquidCrystal_I2C lcd3F(0x3F, 16, 2);
-LiquidCrystal_I2C* lcd = &lcd27;
+// LCD : allocation dynamique apres scan I2C. Couvre toutes les adresses
+// PCF8574 (0x20..0x27) et PCF8574A (0x38..0x3F) des modules 16x2 generiques.
+// `lcdReady` protege contre les calls quand le LCD n'est pas dispo.
+LiquidCrystal_I2C* lcd = nullptr;
+bool lcdReady = false;
+
 Servo triServo;
 WebServer http(80);
 
@@ -69,9 +58,7 @@ enum EtatTri { TRI_INACTIF, TRI_PIVOT, TRI_RETOUR };
 
 bool systemeActive       = false;
 bool verrouSignal        = false;
-bool waitingForClear     = false;  // anti-spam : exige sortie zone HC-SR04 avant prochain trigger
 unsigned long verrouT0   = 0;
-
 EtatTri etatTri          = TRI_INACTIF;
 unsigned long triT0      = 0;
 
@@ -81,10 +68,18 @@ unsigned long debounceT0 = 0;
 unsigned long derniereLectureDist = 0;
 unsigned long dernierRefreshLcd   = 0;
 unsigned long derniereVerifWifi   = 0;
+unsigned long derniereReSynchNtp  = 0;
 
 float distanceActuelle   = -1.0;
 bool bacPlein            = false;
-int  pointsRecyclable    = 0;     // points du dernier tri RECYCLABLE (pour LCD)
+int  pointsRecyclable    = 0;
+
+// Variables pour la validation temporelle
+bool objetSousSeuil      = false;      // vrai si la distance brute est sous seuil
+unsigned long debutPresence = 0;       // moment où l'objet est passé sous seuil
+bool objetConfirme        = false;      // après DELAI_CONFIRMATION_MS
+bool attenteLiberation    = false;      // après déclenchement, on attend que l'objet parte
+unsigned long debutAbsence = 0;         // moment où la distance repasse au-dessus du seuil
 
 // =============================================================================
 //                                  HMAC HELPERS
@@ -100,13 +95,9 @@ String toHex(const uint8_t* buf, size_t len) {
   return out;
 }
 
-// Signature = hex(HMAC-SHA256(secret, "<timestamp>." + body))
-// (correspond a server/security.py:HmacVerifier.verify)
 String hmacSign(const String& timestamp, const String& body) {
   const char* secret = RAYCASH_HMAC_SECRET;
-  if (secret == nullptr || strlen(secret) == 0) {
-    return String("");  // HMAC desactive cote serveur
-  }
+  if (secret == nullptr || strlen(secret) == 0) return String("");
   String message = timestamp + "." + body;
   uint8_t digest[32];
 
@@ -124,12 +115,75 @@ String hmacSign(const String& timestamp, const String& body) {
 // =============================================================================
 //                                  AFFICHAGE LCD
 // =============================================================================
-// LCD 16 colonnes : on padde pour ecraser les caracteres precedents.
+// Helpers safe : ne crashent jamais si le LCD n'est pas init.
+void lcdSafeClear() {
+  if (!lcdReady || lcd == nullptr) return;
+  lcd->clear();
+  delay(2);  // certains clones ont besoin d'une marge apres clear
+}
+
 void lcdLigne(uint8_t row, const String& texte) {
+  if (!lcdReady || lcd == nullptr) return;  // pas de LCD, on ne crash pas
   char buf[17];
   snprintf(buf, sizeof(buf), "%-16s", texte.c_str());
   lcd->setCursor(0, row);
   lcd->print(buf);
+}
+
+// Scan toute la plage commune PCF8574/PCF8574A et alloue dynamiquement le LCD
+// a la premiere adresse qui ACK. Si aucun ACK (clones qui refusent le scan
+// mais marchent quand meme), on tente 0x27 en aveugle. Init avec gros delays
+// pour gerer les modules lents.
+void initLcd() {
+  const uint8_t candidates[] = {
+    0x27, 0x3F,                              // les 2 plus communes
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, // PCF8574 (0x20-0x27)
+    0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E  // PCF8574A (0x38-0x3F)
+  };
+  uint8_t foundAddr = 0;
+
+  Serial.println("[LCD] scan I2C...");
+  for (uint8_t addr : candidates) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.printf("[LCD]   device I2C a 0x%02X\n", addr);
+      if (foundAddr == 0) foundAddr = addr;
+    }
+  }
+
+  if (foundAddr == 0) {
+    Serial.println("[LCD] aucun ACK. Tentative aveugle 0x27 (modules clones).");
+    foundAddr = 0x27;
+  }
+
+  Serial.printf("[LCD] init sur 0x%02X\n", foundAddr);
+  lcd = new LiquidCrystal_I2C(foundAddr, 16, 2);
+  if (lcd == nullptr) {
+    Serial.println("[LCD] echec alloc memoire");
+    return;
+  }
+
+  // Sequence d'init robuste : sleep entre chaque etape pour gerer les clones
+  // qui mettent du temps a se reveiller apres le power-up.
+  delay(50);
+  lcd->init();
+  delay(150);
+  lcd->backlight();
+  delay(50);
+  lcd->clear();
+  delay(50);
+  lcd->home();
+  lcdReady = true;
+
+  // Test visuel : affiche un pattern reconnaissable pendant 800ms pour
+  // confirmer que l'ecran fonctionne avant d'enchainer le boot normal.
+  lcd->setCursor(0, 0);
+  lcd->print("LCD OK 0x");
+  lcd->print(foundAddr, HEX);
+  lcd->setCursor(0, 1);
+  lcd->print("RayCash demarre");
+  delay(800);
+  lcd->clear();
 }
 
 void afficherEtatPrincipal() {
@@ -138,14 +192,14 @@ void afficherEtatPrincipal() {
     lcdLigne(1, bacPlein ? "Statut: bac plein" : "Statut: bac OK");
     return;
   }
-  if (etatTri != TRI_INACTIF) return;  // ne pas ecraser pendant le tri
+  if (etatTri != TRI_INACTIF) return;
 
   if (verrouSignal) {
     lcdLigne(0, "Analyse...");
     lcdLigne(1, "IA en cours");
     return;
   }
-  if (distanceActuelle > 0 && distanceActuelle <= DISTANCE_SEUIL_CM) {
+  if (objetConfirme) {
     char l1[17];
     snprintf(l1, sizeof(l1), "Dist: %.1f cm", distanceActuelle);
     lcdLigne(0, "Dechet detecte!");
@@ -187,7 +241,11 @@ void syncNtp() {
     delay(200);
     time(&now);
   }
-  Serial.printf("[NTP] heure synchro : %ld\n", (long)now);
+  if (now < 1700000000) {
+    Serial.println("[NTP] attention : heure non synchronisée");
+  } else {
+    Serial.printf("[NTP] heure synchro : %ld\n", (long)now);
+  }
 }
 
 void envoyerSignalAServeur(const String& action) {
@@ -215,41 +273,99 @@ void envoyerSignalAServeur(const String& action) {
 }
 
 // =============================================================================
-//                                  CAPTEURS
+//                                  CAPTEUR ULTRASON
 // =============================================================================
 float mesurerDistanceCm() {
-  // Logique simple qui fonctionnait : pas de filtre agressif, juste le
-  // timeout natif. Si pulseIn retourne 0, pas d'echo (objet trop loin).
   digitalWrite(PIN_TRIG, LOW);
   delayMicroseconds(2);
   digitalWrite(PIN_TRIG, HIGH);
   delayMicroseconds(10);
   digitalWrite(PIN_TRIG, LOW);
-
-  long duree = pulseIn(PIN_ECHO, HIGH, 25000);  // 25 ms = ~4 m
+  long duree = pulseIn(PIN_ECHO, HIGH, 25000);
   if (duree == 0) return -1.0;
-  float d = duree * 0.034 / 2.0;
-  // HC-SR04 ne peut pas mesurer < 2cm physiquement. Toute lecture sous 3cm
-  // est du bruit (ECHO pin flottant, masse manquante, alim instable). On
-  // ignore pour eviter le declenchement parasite quand rien n'est devant.
-  if (d < 3.0) return -1.0;
-  return d;
+  return duree * 0.034 / 2.0;
+}
+
+void gererDetection() {
+  if (!systemeActive || etatTri != TRI_INACTIF) return;
+
+  // Lecture brute
+  float dist = mesurerDistanceCm();
+  if (dist > 0 && dist < 400) {
+    distanceActuelle = dist;   // mise à jour pour affichage
+  } else {
+    distanceActuelle = -1.0;
+  }
+
+  bool zoneOccupee = (distanceActuelle > 0 && distanceActuelle <= DISTANCE_SEUIL_CM);
+  bool zoneLibre   = (distanceActuelle < 0 || distanceActuelle > DISTANCE_SEUIL_CM);
+
+  // Détection des transitions
+  if (zoneOccupee && !objetSousSeuil) {
+    // L'objet vient d'apparaître sous le seuil
+    objetSousSeuil = true;
+    debutPresence = millis();
+    objetConfirme = false;
+    Serial.printf("[SR04] objet détecté (%.1f cm)\n", distanceActuelle);
+  }
+  else if (!zoneOccupee && objetSousSeuil) {
+    // L'objet a disparu avant confirmation
+    objetSousSeuil = false;
+    debutPresence = 0;
+    objetConfirme = false;
+    Serial.println("[SR04] objet parti avant confirmation");
+  }
+
+  // Confirmation si l'objet reste sous seuil pendant DELAI_CONFIRMATION_MS
+  if (objetSousSeuil && !objetConfirme && (millis() - debutPresence >= DELAI_CONFIRMATION_MS)) {
+    objetConfirme = true;
+    Serial.printf("[SR04] objet confirmé (%.1f cm)\n", distanceActuelle);
+  }
+
+  // Déclenchement du START
+  if (objetConfirme && !verrouSignal && !attenteLiberation) {
+    Serial.println("[SR04] déclenchement START");
+    verrouSignal = true;
+    verrouT0 = millis();
+    envoyerSignalAServeur("START");
+    objetConfirme = false;
+    objetSousSeuil = false;
+    attenteLiberation = true;
+    debutAbsence = 0;
+  }
+
+  // Gestion de l'absence durable après un déclenchement
+  if (attenteLiberation && zoneLibre) {
+    if (debutAbsence == 0) debutAbsence = millis();
+    else if (millis() - debutAbsence >= DELAI_REARMEMENT_MS) {
+      attenteLiberation = false;
+      debutAbsence = 0;
+      Serial.println("[SR04] zone libre, réarmement");
+    }
+  } else if (attenteLiberation && !zoneLibre) {
+    debutAbsence = 0;   // l'objet est encore là, reset
+  }
 }
 
 // =============================================================================
-//                                  BUZZER
+//                                  BUZZER (sans conflit avec servo)
 // =============================================================================
-void beep(int freq, int dureeMs) { tone(PIN_BUZZER, freq, dureeMs); }
+// On utilise la bibliothèque standard tone() mais attention : elle peut
+// interférer avec le timer du servo. Pour éviter cela, on désactive le servo
+// pendant le bip, ou on utilise ledc. Version simple : on laisse tone() mais
+// on évite de bip pendant le mouvement du servo.
+void beep(int freq, int dureeMs) {
+  tone(PIN_BUZZER, freq, dureeMs);
+  delay(dureeMs);
+  noTone(PIN_BUZZER);
+}
 
 // =============================================================================
 //                              ROUTES SERVEUR LOCAL
 // =============================================================================
-// Le serveur Flask appelle POST {ESP32_IP}/servo avec body = "RECYCLABLE" | "NON_RECYCLABLE"
-// (cf. server/main.py:341). Header X-API-Key obligatoire.
 void handleServo() {
   http.collectHeaders((const char*[]){"X-API-Key"}, 1);
-  if (!http.hasHeader("X-API-Key") ||
-      http.header("X-API-Key") != String(RAYCASH_API_KEY)) {
+  if (!http.hasHeader("X-API-Key") || http.header("X-API-Key") != String(RAYCASH_API_KEY)) {
     http.send(401, "application/json", "{\"error\":\"unauthorized\"}");
     return;
   }
@@ -261,8 +377,6 @@ void handleServo() {
   body.trim();
   Serial.printf("[/servo] ordre = %s\n", body.c_str());
 
-  // Parse "TRI_STATUS:points" envoye par le serveur (ex: "RECYCLABLE:40" ou
-  // "NON_RECYCLABLE:0"). Si pas de ":", on fallback en mode tri-status seul.
   String triStatus = body;
   int pts = 0;
   int sep = body.indexOf(':');
@@ -274,10 +388,8 @@ void handleServo() {
   if (triStatus == "RECYCLABLE") {
     pointsRecyclable = pts;
     beep(2000, 120);
-    triServo.attach(PIN_SERVO, 500, 2400);  // reactive le PWM avant de bouger
     triServo.write(ANGLE_RECYCLABLE);
-    lcd->clear();
-    // Ligne 1 : "Recyclable", ligne 2 : "+40 pts 4000 ar" (1 pt = 100 ar)
+    lcdSafeClear();
     char l1[17];
     snprintf(l1, sizeof(l1), "+%d pts %d ar", pts, pts * 100);
     lcdLigne(0, "Recyclable");
@@ -287,9 +399,8 @@ void handleServo() {
   } else if (triStatus == "NON_RECYCLABLE") {
     pointsRecyclable = 0;
     beep(350, 600);
-    triServo.attach(PIN_SERVO, 500, 2400);  // reactive le PWM avant de bouger
     triServo.write(ANGLE_NON_RECYCLABLE);
-    lcd->clear();
+    lcdSafeClear();
     lcdLigne(0, "Non recyclable");
     lcdLigne(1, "0 pts");
     etatTri = TRI_PIVOT;
@@ -308,8 +419,6 @@ void handleHealth() {
 // =============================================================================
 //                              MACHINE A ETATS TRI
 // =============================================================================
-// Evite tout delay() bloquant : le webserver continue d'accepter des requetes,
-// le bouton ON/OFF reste reactif, le LCD reste fluide.
 void avancerEtatTri() {
   if (etatTri == TRI_INACTIF) return;
   unsigned long maintenant = millis();
@@ -320,19 +429,17 @@ void avancerEtatTri() {
   } else if (etatTri == TRI_RETOUR && maintenant - triT0 >= TRI_RETOUR_MS) {
     etatTri = TRI_INACTIF;
     verrouSignal = false;
-    waitingForClear = true;  // empeche re-trigger tant que l'objet n'est pas retire
-    triServo.detach();       // coupe le PWM : servo en roue libre, plus de jitter
-    lcd->clear();
+    lcdSafeClear();
   }
 }
 
 // =============================================================================
-//                                  SETUP / LOOP
+//                                  SETUP
 // =============================================================================
 void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.println("\n=== RayCash firmware complete ===");
+  Serial.println("\n=== RayCash firmware (validation temporelle) ===");
 
   pinMode(PIN_BOUTON, INPUT_PULLUP);
   pinMode(PIN_BUZZER, OUTPUT);
@@ -340,36 +447,20 @@ void setup() {
   pinMode(PIN_ECHO, INPUT);
   pinMode(PIN_IR, INPUT_PULLUP);
 
+  // Initialisation servo
   ESP32PWM::allocateTimer(0);
   triServo.setPeriodHertz(50);
-  triServo.attach(PIN_SERVO, 500, 2400);
+  triServo.attach(PIN_SERVO, 1000, 2000);
   triServo.write(ANGLE_REPOS);
-  delay(500);          // laisse au servo le temps d'atteindre 90
-  triServo.detach();   // coupe le PWM au repos -> plus de jitter/buzz
 
   Wire.begin();
-  delay(50);
+  delay(100);   // marge pour que le LCD termine son auto-reset interne
 
-  // Scan I2C : detecte sur quelle adresse repond le module PCF8574 du LCD.
-  // 0x27 et 0x3F sont les 2 communes ; le pointeur "lcd" est redirige vers
-  // l'objet statique pre-construit a la bonne adresse.
-  Wire.beginTransmission(0x27);
-  if (Wire.endTransmission() == 0) {
-    lcd = &lcd27;
-    Serial.println("[I2C] LCD detecte a 0x27");
-  } else {
-    Wire.beginTransmission(0x3F);
-    if (Wire.endTransmission() == 0) {
-      lcd = &lcd3F;
-      Serial.println("[I2C] LCD detecte a 0x3F");
-    } else {
-      Serial.println("[I2C] AUCUN LCD detecte (cablage SDA=21 SCL=22 ? 5V ? GND ?)");
-    }
-  }
-  lcd->init();
-  lcd->backlight();
+  // Init LCD robuste : scan I2C large, allocation dynamique, sequence
+  // d'init avec delays adaptes aux modules clones.
+  initLcd();
   lcdLigne(0, "RayCash boot...");
-  lcdLigne(1, "Wi-Fi en cours");
+  lcdLigne(1, "Wi-Fi...");
 
   Serial.printf("[WIFI] connexion a %s ", WIFI_SSID);
   if (!wifiConnect(WIFI_TIMEOUT_MS)) {
@@ -384,6 +475,7 @@ void setup() {
   lcdLigne(1, WiFi.localIP().toString());
 
   syncNtp();
+  derniereReSynchNtp = millis();
 
   http.on("/servo",  HTTP_POST, handleServo);
   http.on("/health", HTTP_GET,  handleHealth);
@@ -393,71 +485,78 @@ void setup() {
   http.begin();
   Serial.println("[HTTP] serveur local pret");
   delay(800);
-  lcd->clear();
+  lcdSafeClear();
+  lcdLigne(0, "RayCash: pret");
+  lcdLigne(1, "Deposez un objet");
+
+  // Attendre 2 secondes pour stabiliser l'ultrason
+  for (int i = 0; i < 20; i++) {
+    mesurerDistanceCm();
+    delay(100);
+  }
+  // Réinitialiser les flags pour éviter un faux déclenchement initial
+  objetSousSeuil = false;
+  objetConfirme = false;
+  attenteLiberation = true;   // exige une libération avant premier déclenchement
+  debutPresence = 0;
+  debutAbsence = 0;
+  distanceActuelle = -1.0;
 }
 
+// =============================================================================
+//                                  LOOP
+// =============================================================================
 void loop() {
   http.handleClient();
   verifierWifi();
+
+  if (time(nullptr) < 1700000000 && (millis() - derniereReSynchNtp > 3600000)) {
+    derniereReSynchNtp = millis();
+    syncNtp();
+  }
+
   avancerEtatTri();
 
-  // --- Bouton ON/OFF ---
+  // Bouton ON/OFF
   int lecture = digitalRead(PIN_BOUTON);
-  if (lecture == LOW && dernierEtatBouton == HIGH &&
-      (millis() - debounceT0) > DEBOUNCE_MS) {
+  if (lecture == LOW && dernierEtatBouton == HIGH && (millis() - debounceT0) > DEBOUNCE_MS) {
     debounceT0 = millis();
     systemeActive = !systemeActive;
     verrouSignal = false;
     etatTri = TRI_INACTIF;
-    // Securite : reactive le PWM, force la position 90, puis detache pour
-    // que le servo n'oscille pas au repos.
-    triServo.attach(PIN_SERVO, 500, 2400);
+    objetSousSeuil = false;
+    objetConfirme = false;
+    attenteLiberation = true;  // on attend une libération après réactivation
+    debutPresence = 0;
+    debutAbsence = 0;
     triServo.write(ANGLE_REPOS);
-    delay(400);
-    triServo.detach();
-    lcd->clear();
+    lcdSafeClear();
     Serial.println(systemeActive ? "[BTN] ACTIVE" : "[BTN] VEILLE");
     beep(systemeActive ? 1000 : 500, 200);
   }
   dernierEtatBouton = lecture;
 
-  // --- IR (bac plein) -- pas critique, juste de l'info ---
   bacPlein = (digitalRead(PIN_IR) == LOW);
 
-  // --- HC-SR04 (proximite) ---
-  if (systemeActive && etatTri == TRI_INACTIF &&
-      millis() - derniereLectureDist >= DISTANCE_INTERVAL_MS) {
-    derniereLectureDist = millis();
-    distanceActuelle = mesurerDistanceCm();
-
-    bool zoneOccupee = (distanceActuelle > 0 && distanceActuelle <= DISTANCE_SEUIL_CM);
-    bool zoneLibre   = (distanceActuelle < 0 || distanceActuelle > DISTANCE_SEUIL_CM);
-
-    // Apres un tri, on attend que la zone soit liberee avant d'autoriser un
-    // nouveau trigger (sinon le meme dechet declenche en boucle).
-    if (waitingForClear && zoneLibre) {
-      waitingForClear = false;
-      Serial.println("[SR04] zone liberee, re-arme");
-    }
-
-    if (zoneOccupee && !verrouSignal && !waitingForClear) {
-      Serial.printf("[SR04] seuil atteint (%.1f cm) -> POST START\n", distanceActuelle);
-      verrouSignal = true;
-      verrouT0 = millis();
-      envoyerSignalAServeur("START");
-    }
+  // Gestion ultrason : appel périodique
+  static unsigned long lastMeasure = 0;
+  if (millis() - lastMeasure >= DISTANCE_INTERVAL_MS) {
+    lastMeasure = millis();
+    gererDetection();   // cette fonction lit la distance et gère les timings
   }
 
-  // --- Timeout du verrou : si serveur ne repond jamais ---
-  if (verrouSignal && etatTri == TRI_INACTIF &&
-      millis() - verrouT0 > VERROU_TIMEOUT_MS) {
+  // Timeout verrou
+  if (verrouSignal && etatTri == TRI_INACTIF && millis() - verrouT0 > VERROU_TIMEOUT_MS) {
     Serial.println("[LOCK] timeout, libere verrou");
     verrouSignal = false;
-    waitingForClear = true;  // meme apres timeout : exige sortie zone avant nouvelle tentative
+    attenteLiberation = true;
+    debutAbsence = 0;
+    objetConfirme = false;
+    objetSousSeuil = false;
     beep(400, 400);
   }
 
-  // --- LCD : refresh throttled ---
+  // Rafraîchissement LCD
   if (millis() - dernierRefreshLcd >= LCD_REFRESH_MS) {
     dernierRefreshLcd = millis();
     afficherEtatPrincipal();
