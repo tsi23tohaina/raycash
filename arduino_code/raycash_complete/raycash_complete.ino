@@ -269,6 +269,7 @@ void handleServo() {
   if (triStatus == "RECYCLABLE") {
     pointsRecyclable = pts;
     beep(2000, 120);
+    triServo.attach(PIN_SERVO, 500, 2400);  // reactive le PWM avant de bouger
     triServo.write(ANGLE_RECYCLABLE);
     lcd->clear();
     // Ligne 1 : "Recyclable", ligne 2 : "+40 pts 4000 ar" (1 pt = 100 ar)
@@ -281,6 +282,7 @@ void handleServo() {
   } else if (triStatus == "NON_RECYCLABLE") {
     pointsRecyclable = 0;
     beep(350, 600);
+    triServo.attach(PIN_SERVO, 500, 2400);  // reactive le PWM avant de bouger
     triServo.write(ANGLE_NON_RECYCLABLE);
     lcd->clear();
     lcdLigne(0, "Non recyclable");
@@ -314,6 +316,7 @@ void avancerEtatTri() {
     etatTri = TRI_INACTIF;
     verrouSignal = false;
     waitingForClear = true;  // empeche re-trigger tant que l'objet n'est pas retire
+    triServo.detach();       // coupe le PWM : servo en roue libre, plus de jitter
     lcd->clear();
   }
 }
@@ -336,6 +339,8 @@ void setup() {
   triServo.setPeriodHertz(50);
   triServo.attach(PIN_SERVO, 500, 2400);
   triServo.write(ANGLE_REPOS);
+  delay(500);          // laisse au servo le temps d'atteindre 90
+  triServo.detach();   // coupe le PWM au repos -> plus de jitter/buzz
 
   Wire.begin();
   delay(50);
@@ -399,7 +404,12 @@ void loop() {
     systemeActive = !systemeActive;
     verrouSignal = false;
     etatTri = TRI_INACTIF;
+    // Securite : reactive le PWM, force la position 90, puis detache pour
+    // que le servo n'oscille pas au repos.
+    triServo.attach(PIN_SERVO, 500, 2400);
     triServo.write(ANGLE_REPOS);
+    delay(400);
+    triServo.detach();
     lcd->clear();
     Serial.println(systemeActive ? "[BTN] ACTIVE" : "[BTN] VEILLE");
     beep(systemeActive ? 1000 : 500, 200);
