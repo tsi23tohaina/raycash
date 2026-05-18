@@ -84,7 +84,6 @@ unsigned long derniereVerifWifi   = 0;
 
 float distanceActuelle   = -1.0;
 bool bacPlein            = false;
-int  consecutifsDansZone = 0;     // anti-bruit : exige 2 lectures consecutives < seuil
 int  pointsRecyclable    = 0;     // points du dernier tri RECYCLABLE (pour LCD)
 
 // =============================================================================
@@ -219,19 +218,17 @@ void envoyerSignalAServeur(const String& action) {
 //                                  CAPTEURS
 // =============================================================================
 float mesurerDistanceCm() {
+  // Logique simple qui fonctionnait : pas de filtre agressif, juste le
+  // timeout natif. Si pulseIn retourne 0, pas d'echo (objet trop loin).
   digitalWrite(PIN_TRIG, LOW);
   delayMicroseconds(2);
   digitalWrite(PIN_TRIG, HIGH);
   delayMicroseconds(10);
   digitalWrite(PIN_TRIG, LOW);
 
-  long duree = pulseIn(PIN_ECHO, HIGH, 30000);  // 30 ms = ~5 m
-  // Filtre les lectures aberrantes :
-  // - duree == 0 : pas d'echo (timeout)
-  // - duree < 200us : ~3.4cm = bruit electrique ou ECHO flottant
-  // - duree > 25000us : trop loin, peu fiable
-  if (duree < 200 || duree > 25000) return -1.0;
-  return duree * 0.0343 / 2.0;
+  long duree = pulseIn(PIN_ECHO, HIGH, 25000);  // 25 ms = ~4 m
+  if (duree == 0) return -1.0;
+  return duree * 0.034 / 2.0;
 }
 
 // =============================================================================
@@ -421,15 +418,6 @@ void loop() {
     bool zoneOccupee = (distanceActuelle > 0 && distanceActuelle <= DISTANCE_SEUIL_CM);
     bool zoneLibre   = (distanceActuelle < 0 || distanceActuelle > DISTANCE_SEUIL_CM);
 
-    // Anti-bruit : exige 2 lectures consecutives "in zone" avant de declencher.
-    // Filtre les spikes HC-SR04 quand le capteur est mal cable ou mal alimente.
-    if (zoneOccupee) {
-      if (consecutifsDansZone < 10) consecutifsDansZone++;
-    } else {
-      consecutifsDansZone = 0;
-    }
-    bool detectionStable = (consecutifsDansZone >= 2);
-
     // Apres un tri, on attend que la zone soit liberee avant d'autoriser un
     // nouveau trigger (sinon le meme dechet declenche en boucle).
     if (waitingForClear && zoneLibre) {
@@ -437,7 +425,7 @@ void loop() {
       Serial.println("[SR04] zone liberee, re-arme");
     }
 
-    if (detectionStable && !verrouSignal && !waitingForClear) {
+    if (zoneOccupee && !verrouSignal && !waitingForClear) {
       Serial.printf("[SR04] seuil atteint (%.1f cm) -> POST START\n", distanceActuelle);
       verrouSignal = true;
       verrouT0 = millis();
