@@ -228,7 +228,12 @@ float mesurerDistanceCm() {
 
   long duree = pulseIn(PIN_ECHO, HIGH, 25000);  // 25 ms = ~4 m
   if (duree == 0) return -1.0;
-  return duree * 0.034 / 2.0;
+  float d = duree * 0.034 / 2.0;
+  // HC-SR04 ne peut pas mesurer < 2cm physiquement. Toute lecture sous 3cm
+  // est du bruit (ECHO pin flottant, masse manquante, alim instable). On
+  // ignore pour eviter le declenchement parasite quand rien n'est devant.
+  if (d < 3.0) return -1.0;
+  return d;
 }
 
 // =============================================================================

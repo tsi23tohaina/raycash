@@ -428,9 +428,14 @@
     // (un dechet que l'IA ne classe pas dans une categorie connue n'est pas
     // recyclable du point de vue de la machine).
     function displayLabel(rawLabel, triStatus) {
-        if (!rawLabel || rawLabel === 'Inconnu') return 'Non recyclable';
-        if (triStatus === 'NON_RECYCLABLE') return 'Non recyclable';
-        return rawLabel;
+        const label = String(rawLabel || '').trim();
+        // Tout dechet non classe (label "Inconnu" en n'importe quelle casse) OU
+        // dont la decision serveur est NON_RECYCLABLE doit etre affiche
+        // "Non recyclable" dans l'UI.
+        if (!label) return 'Non recyclable';
+        if (label.toLowerCase() === 'inconnu') return 'Non recyclable';
+        if (String(triStatus || '').toUpperCase() === 'NON_RECYCLABLE') return 'Non recyclable';
+        return label;
     }
 
     function fmtTime(d) {
