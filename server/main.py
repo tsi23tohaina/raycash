@@ -342,13 +342,13 @@ def predict():
             except Exception:
                 log.exception("Persistance du scan a échoué")
 
-            # Pilotage du servo ESP32 — best-effort. Body format : "TRI_STATUS:points:label"
-            # ex: "RECYCLABLE:40:Plastique" ou "NON_RECYCLABLE:0:Inconnu". L'ESP32
-            # parse les 3 parties pour afficher type + points + total sur le LCD.
+            # Pilotage du servo ESP32 — best-effort. Body format : "TRI_STATUS:points"
+            # ex: "RECYCLABLE:40" ou "NON_RECYCLABLE:0". L'ESP32 parse pour afficher
+            # les points sur le LCD.
             try:
                 esp32_session.post(
                     f"{SETTINGS.esp32_ip}/servo",
-                    data=f"{pred.tri_status}:{pred.points}:{pred.label}",
+                    data=f"{pred.tri_status}:{pred.points}",
                     timeout=SETTINGS.esp32_timeout_seconds,
                 )
             except requests.RequestException as e:

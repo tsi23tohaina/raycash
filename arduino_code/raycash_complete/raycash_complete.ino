@@ -407,10 +407,15 @@ void handleServo() {
     beep(2000, 120);
     triServo.write(ANGLE_RECYCLABLE);
     lcdSafeClear();
-    // Ligne 1 : "Recyclable" (en clair). Ligne 2 : "<label> +<pts>" tronque
-    // a 16 chars par lcdLigne.
+    // Ligne 1 : "Recyclable" (toujours en clair).
+    // Ligne 2 : "<label> +<pts>" si le serveur envoie le label (format
+    // "TRI:points:label"), sinon juste "+<pts> pts".
     char l1[24];
-    snprintf(l1, sizeof(l1), "%s +%d", label.c_str(), pts);
+    if (label.length() > 0) {
+      snprintf(l1, sizeof(l1), "%s +%d", label.c_str(), pts);
+    } else {
+      snprintf(l1, sizeof(l1), "+%d pts", pts);
+    }
     lcdLigne(0, "Recyclable");
     lcdLigne(1, l1);
     etatTri = TRI_PIVOT;
