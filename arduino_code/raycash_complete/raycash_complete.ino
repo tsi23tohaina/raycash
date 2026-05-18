@@ -25,8 +25,9 @@ const int ANGLE_NON_RECYCLABLE  = 180;
 
 const float DISTANCE_SEUIL_CM   = 15.0;   // seuil de détection
 const unsigned long DEBOUNCE_MS = 50;
-const unsigned long TRI_DUREE_MS         = 2000;
-const unsigned long TRI_RETOUR_MS        = 500;
+const unsigned long TRI_DUREE_MS         = 3000;  // 3s : pivot servo + affichage resultat scan
+const unsigned long TRI_RETOUR_MS        = 300;   // retour servo au repos
+const unsigned long TRI_TOTAL_MS         = 3000;  // 3s : affichage point total + gain ar
 const unsigned long VERROU_TIMEOUT_MS    = 15000;
 const unsigned long WIFI_TIMEOUT_MS      = 20000;
 const unsigned long WIFI_RECHECK_MS      = 5000;
@@ -54,7 +55,12 @@ WebServer http(80);
 // =============================================================================
 //                                    ETATS
 // =============================================================================
-enum EtatTri { TRI_INACTIF, TRI_PIVOT, TRI_RETOUR };
+// Etats du cycle de tri :
+//   TRI_INACTIF  -> au repos, attente d'un nouveau dechet
+//   TRI_PIVOT    -> servo bouge vers la categorie + LCD affiche resultat scan
+//   TRI_RETOUR   -> servo revient au repos (LCD garde le resultat affiche)
+//   TRI_TOTAL    -> LCD affiche le total session (points + gain ar)
+enum EtatTri { TRI_INACTIF, TRI_PIVOT, TRI_RETOUR, TRI_TOTAL };
 
 bool systemeActive       = false;
 bool verrouSignal        = false;
@@ -72,7 +78,8 @@ unsigned long derniereReSynchNtp  = 0;
 
 float distanceActuelle   = -1.0;
 bool bacPlein            = false;
-int  pointsRecyclable    = 0;
+int  pointsRecyclable    = 0;     // points du dernier scan
+int  pointsSessionTotal  = 0;     // cumul depuis le boot/dernier reset
 
 // Variables pour la validation temporelle
 bool objetSousSeuil      = false;      // vrai si la distance brute est sous seuil
@@ -377,21 +384,33 @@ void handleServo() {
   body.trim();
   Serial.printf("[/servo] ordre = %s\n", body.c_str());
 
+  // Format attendu : "TRI_STATUS:points:label" (ex: "RECYCLABLE:40:Plastique").
+  // Backward compat : si pas de 2eme ":", le label est vide.
   String triStatus = body;
   int pts = 0;
-  int sep = body.indexOf(':');
-  if (sep > 0) {
-    triStatus = body.substring(0, sep);
-    pts = body.substring(sep + 1).toInt();
+  String label = "";
+  int sep1 = body.indexOf(':');
+  if (sep1 > 0) {
+    triStatus = body.substring(0, sep1);
+    int sep2 = body.indexOf(':', sep1 + 1);
+    if (sep2 > 0) {
+      pts = body.substring(sep1 + 1, sep2).toInt();
+      label = body.substring(sep2 + 1);
+    } else {
+      pts = body.substring(sep1 + 1).toInt();
+    }
   }
 
   if (triStatus == "RECYCLABLE") {
     pointsRecyclable = pts;
+    pointsSessionTotal += pts;
     beep(2000, 120);
     triServo.write(ANGLE_RECYCLABLE);
     lcdSafeClear();
-    char l1[17];
-    snprintf(l1, sizeof(l1), "+%d pts %d ar", pts, pts * 100);
+    // Ligne 1 : "Recyclable" (en clair). Ligne 2 : "<label> +<pts>" tronque
+    // a 16 chars par lcdLigne.
+    char l1[24];
+    snprintf(l1, sizeof(l1), "%s +%d", label.c_str(), pts);
     lcdLigne(0, "Recyclable");
     lcdLigne(1, l1);
     etatTri = TRI_PIVOT;
@@ -402,7 +421,7 @@ void handleServo() {
     triServo.write(ANGLE_NON_RECYCLABLE);
     lcdSafeClear();
     lcdLigne(0, "Non recyclable");
-    lcdLigne(1, "0 pts");
+    lcdLigne(1, "+0 pts");
     etatTri = TRI_PIVOT;
     triT0 = millis();
   } else {
@@ -422,11 +441,31 @@ void handleHealth() {
 void avancerEtatTri() {
   if (etatTri == TRI_INACTIF) return;
   unsigned long maintenant = millis();
+
+  // TRI_PIVOT (3s) : servo bouge, LCD garde le resultat du scan ("Recyclable
+  // / Plastique +40"). Apres TRI_DUREE_MS, on rapatrie le servo et on passe
+  // a TRI_RETOUR.
   if (etatTri == TRI_PIVOT && maintenant - triT0 >= TRI_DUREE_MS) {
     triServo.write(ANGLE_REPOS);
     etatTri = TRI_RETOUR;
     triT0 = maintenant;
-  } else if (etatTri == TRI_RETOUR && maintenant - triT0 >= TRI_RETOUR_MS) {
+  }
+  // TRI_RETOUR (~300ms) : servo termine son retour. A la fin, on bascule
+  // l'affichage sur le total session (TRI_TOTAL).
+  else if (etatTri == TRI_RETOUR && maintenant - triT0 >= TRI_RETOUR_MS) {
+    lcdSafeClear();
+    char l0[24];
+    char l1[24];
+    snprintf(l0, sizeof(l0), "Total: %d pts", pointsSessionTotal);
+    snprintf(l1, sizeof(l1), "Gain: %d ar", pointsSessionTotal * 100);
+    lcdLigne(0, l0);
+    lcdLigne(1, l1);
+    etatTri = TRI_TOTAL;
+    triT0 = maintenant;
+  }
+  // TRI_TOTAL (3s) : l'utilisateur lit son total + gain. Apres, on revient
+  // au mode "pret a scanner" en liberant le verrou.
+  else if (etatTri == TRI_TOTAL && maintenant - triT0 >= TRI_TOTAL_MS) {
     etatTri = TRI_INACTIF;
     verrouSignal = false;
     lcdSafeClear();
