@@ -161,6 +161,20 @@ scan_repo = ScanRepository(db_path=SETTINGS.db_path)
 esp32_session = requests.Session()
 esp32_session.headers.update({"X-API-Key": SETTINGS.api_key})
 
+# IP de l'ESP32 capturee dynamiquement a chaque /esp_signal entrant. Permet
+# au callback /servo de joindre l'ESP32 sans config statique dans .env :
+# l'ESP32 "annonce" sa propre IP a chaque fois qu'il declenche un scan.
+# Si vide (ex: au boot avant tout signal ESP32), on retombe sur SETTINGS.esp32_ip
+# du .env comme fallback.
+_esp32_runtime_ip: str | None = None
+
+def _get_esp32_url() -> str:
+    """Retourne l'URL ESP32 a utiliser pour le callback /servo. Priorite a
+    l'IP capturee a runtime (auto-decouverte), fallback sur .env si vide."""
+    if _esp32_runtime_ip:
+        return f"http://{_esp32_runtime_ip}"
+    return SETTINGS.esp32_ip
+
 # --- SECURITY DECORATORS ---
 require_api_key = make_require_api_key(SETTINGS.api_key)
 hmac_verifier = HmacVerifier(SETTINGS.hmac_secret, SETTINGS.hmac_max_skew_seconds)
@@ -217,6 +231,14 @@ def esp_signal():
     action = data.get("action")
     if action not in {"START", "STOP"}:
         return jsonify({"error": "action invalide"}), 400
+
+    # Auto-decouverte de l'IP ESP32 : on memorise l'adresse source du POST
+    # pour pouvoir lui renvoyer le verdict sur /servo sans ESP32_IP statique.
+    global _esp32_runtime_ip
+    src_ip = request.remote_addr
+    if src_ip and src_ip != _esp32_runtime_ip:
+        _esp32_runtime_ip = src_ip
+        log.info("ESP32 IP auto-decouverte : %s", _esp32_runtime_ip)
 
     log.info("Signal matériel reçu de l'ESP32 : %s", action)
     if action == "START":
@@ -347,7 +369,7 @@ def predict():
             # les points sur le LCD.
             try:
                 esp32_session.post(
-                    f"{SETTINGS.esp32_ip}/servo",
+                    f"{_get_esp32_url()}/servo",
                     data=f"{pred.tri_status}:{pred.points}",
                     timeout=SETTINGS.esp32_timeout_seconds,
                 )
