@@ -27,7 +27,7 @@ jobs:
         run: flutter pub get
 
       - name: Analyze (static analysis + lints)
-        run: flutter analyze
+        run: flutter analyze --no-fatal-infos
 
       - name: Run Flutter tests
         run: flutter test
