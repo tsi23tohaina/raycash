@@ -34,7 +34,7 @@ const int PIN_SERVO  = 13;
 
 const int ANGLE_REPOS      = 90;
 const int ANGLE_RECYCLABLE = 180;
-const int ANGLE_INCONNU    = 0;
+const int ANGLE_NON_RECYCLABLE    = 0;
 
 const float DISTANCE_SEUIL_CM   = 10.0;
 const unsigned long DEBOUNCE_MS = 50;
@@ -228,7 +228,7 @@ void beep(int freq, int dureeMs) { tone(PIN_BUZZER, freq, dureeMs); }
 // =============================================================================
 //                              ROUTES SERVEUR LOCAL
 // =============================================================================
-// Le serveur Flask appelle POST {ESP32_IP}/servo avec body = "RECYCLABLE" | "INCONNU"
+// Le serveur Flask appelle POST {ESP32_IP}/servo avec body = "RECYCLABLE" | "NON_RECYCLABLE"
 // (cf. server/main.py:341). Header X-API-Key obligatoire.
 void handleServo() {
   http.collectHeaders((const char*[]){"X-API-Key"}, 1);
@@ -253,11 +253,11 @@ void handleServo() {
     lcdLigne(1, "Ticket en cours");
     etatTri = TRI_PIVOT;
     triT0 = millis();
-  } else if (body == "INCONNU") {
+  } else if (body == "NON_RECYCLABLE") {
     beep(350, 600);
-    triServo.write(ANGLE_INCONNU);
+    triServo.write(ANGLE_NON_RECYCLABLE);
     lcd.clear();
-    lcdLigne(0, "Dechet inconnu");
+    lcdLigne(0, "Non recyclable");
     lcdLigne(1, "Pas de ticket");
     etatTri = TRI_PIVOT;
     triT0 = millis();

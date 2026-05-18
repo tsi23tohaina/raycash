@@ -169,7 +169,7 @@ class GeminiClassifier:
             tri_status = "RECYCLABLE"
         else:
             points = 0
-            tri_status = "INCONNU"
+            tri_status = "NON_RECYCLABLE"
 
         # Pour rester compatible avec l'UI session qui affiche `per_model_details`
         per_model = [{
@@ -284,7 +284,7 @@ class GeminiClassifier:
                 label="Inconnu",
                 confidence=0.0,
                 points=0,
-                tri_status="INCONNU",
+                tri_status="NON_RECYCLABLE",
                 uncertain=True,
                 accepted=False,
             )

@@ -29,7 +29,7 @@ void main() {
       expect(scan.confidence, '');
       expect(scan.imageUrl, '');
       expect(scan.fullImageUrl, '');
-      expect(scan.triStatus, 'INCONNU');
+      expect(scan.triStatus, 'NON_RECYCLABLE');
       expect(scan.points, isNull);
     });
 

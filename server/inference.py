@@ -51,7 +51,7 @@ class Prediction:
     label: str
     confidence: float
     points: int
-    tri_status: str  # "RECYCLABLE" | "INCONNU"
+    tri_status: str  # "RECYCLABLE" | "NON_RECYCLABLE"
     # Champs d'incertitude (toujours présents, valent 0/False pour Classifier single)
     uncertain: bool = False
     entropy: float = 0.0
@@ -166,7 +166,7 @@ class Classifier:
             label=label,
             confidence=confidence,
             points=self.points_for(label) if is_recyclable else 0,
-            tri_status="RECYCLABLE" if is_recyclable else "INCONNU",
+            tri_status="RECYCLABLE" if is_recyclable else "NON_RECYCLABLE",
             uncertain=not accepted,
             accepted=accepted,
         )
@@ -347,7 +347,7 @@ class EnsembleClassifier:
             label=label,
             confidence=confidence,
             points=self.points_for(label) if is_recyclable else 0,
-            tri_status="RECYCLABLE" if is_recyclable else "INCONNU",
+            tri_status="RECYCLABLE" if is_recyclable else "NON_RECYCLABLE",
             uncertain=not accepted,
             entropy=entropy,
             disagreement=disagreement,

@@ -148,7 +148,7 @@ Puis redémarre le serveur (Ctrl+C + relance).
    - L'app Flutter prend une photo de la webcam
    - Envoie l'image à `/predict`
    - Le serveur classifie + appelle `POST /servo` sur l'ESP32
-   - Le servo pivote vers `RECYCLABLE` (180°) ou `INCONNU` (0°), puis revient au repos (90°)
+   - Le servo pivote vers `RECYCLABLE` (180°) ou `NON_RECYCLABLE` (0°), puis revient au repos (90°)
    - L'app affiche le label + points dans l'onglet "Session"
 
 ---

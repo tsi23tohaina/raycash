@@ -54,6 +54,6 @@ class TestPrediction:
         assert p.points == 40
         assert p.tri_status == "RECYCLABLE"
 
-    def test_prediction_inconnu_zero_points(self):
-        p = Prediction(label="Inconnu", confidence=0.3, points=0, tri_status="INCONNU")
+    def test_prediction_non_recyclable_zero_points(self):
+        p = Prediction(label="Inconnu", confidence=0.3, points=0, tri_status="NON_RECYCLABLE")
         assert p.points == 0

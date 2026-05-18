@@ -27,10 +27,10 @@ unsigned long delaiDebounce = 50;
 WebServer http(80);
 Servo trappe;
 
-// Position de repos / RECYCLABLE / INCONNU
+// Position de repos / RECYCLABLE / NON_RECYCLABLE
 const int SERVO_REPOS      = 90;
 const int SERVO_RECYCLABLE = 180;
-const int SERVO_INCONNU    = 0;
+const int SERVO_NON_RECYCLABLE    = 0;
 const unsigned long PIVOT_DELAY_MS = 1500;
 
 void setup() {
@@ -98,7 +98,7 @@ bool authentifierRequete() {
   return true;
 }
 
-// Reçoit l'ordre du serveur Flask après classification : RECYCLABLE / INCONNU.
+// Reçoit l'ordre du serveur Flask après classification : RECYCLABLE / NON_RECYCLABLE.
 void handleServo() {
   http.collectHeaders((const char*[]){"X-API-Key"}, 1);
   if (!authentifierRequete()) return;
@@ -110,8 +110,8 @@ void handleServo() {
 
   if (body == "RECYCLABLE") {
     trappe.write(SERVO_RECYCLABLE);
-  } else if (body == "INCONNU") {
-    trappe.write(SERVO_INCONNU);
+  } else if (body == "NON_RECYCLABLE") {
+    trappe.write(SERVO_NON_RECYCLABLE);
   } else {
     http.send(400, "application/json", "{\"error\":\"action_invalide\"}");
     return;
