@@ -1,7 +1,8 @@
 # RayCash server — dependances pinnees pour install reproductible.
 #
 # Pre-requis non-Python (a installer separement) :
-#   - Python 3.11.x  (tensorflow ne supporte que 3.9-3.12, 3.11 teste OK)
+#   - Python >=3.10, <=3.12  (tensorflow 2.21 requiert 3.10-3.13, dev teste sur 3.11.9)
+#     Python 3.10.11 et 3.12.x testes compatibles.
 #   - cloudflared    (le serveur le lance via subprocess pour le tunnel HTTPS)
 #       Windows : winget install Cloudflare.cloudflared
 #       Mac     : brew install cloudflared
