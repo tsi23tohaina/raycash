@@ -300,10 +300,12 @@
 
     <button class="flash-btn" id="flashBtn" type="button" aria-label="Flash">⚡</button>
 
-    <div class="hint" id="hint">Vise l'objet et appuie sur le bouton</div>
+    <div class="hint" id="hint">En attente d'un objet sur la machine...</div>
 
-    <!-- Bouton capture central (mode "preview live") -->
-    <button class="capture-btn" id="captureBtn" type="button" disabled aria-label="Scanner"></button>
+    <!-- Bouton capture central — masque par defaut, la capture se declenche
+         automatiquement sur signal ESP32 (HC-SR04). On garde le bouton dans
+         le DOM pour reutiliser la logique de click, mais il reste invisible. -->
+    <button class="capture-btn hidden" id="captureBtn" type="button" disabled aria-label="Scanner"></button>
 
     <!-- Bouton "nouveau scan" (mode "résultat affiché") -->
     <button class="new-scan-btn" id="newScanBtn" type="button">🔄 NOUVEAU SCAN</button>
@@ -453,10 +455,21 @@
         }
     });
 
-    // --- Socket.IO pour signaler la connexion au laptop ---
+    // --- Socket.IO ---
+    // 1. Signale la connexion au laptop (-> /pair redirige vers /session)
+    // 2. Ecoute "command_from_esp" : l'ESP32 a detecte un objet via HC-SR04
+    //    et a envoye POST /esp_signal action=START. Le serveur broadcast a
+    //    tous les clients. On declenche alors la capture automatiquement,
+    //    seulement si on est en mode preview (pas pendant une analyse en cours).
     try {
         const socket = io({ transports: ['websocket'], reconnection: true });
         socket.on('connect', () => socket.emit('phone_connected', { ua: navigator.userAgent }));
+        socket.on('command_from_esp', (msg) => {
+            if (!msg || msg.action !== 'START') return;
+            if (captureBtn.disabled) return; // analyse deja en cours ou ecran resultat
+            console.log('[ESP32] START recu -> capture auto');
+            captureBtn.click(); // reutilise le flow existant (flash + freeze + /predict)
+        });
     } catch (e) { /* OK même sans socket */ }
 
     // --- Capture : on prend la frame, on la resize si trop grosse, on retourne le Blob ---
@@ -472,26 +485,26 @@
     }
 
     // --- États UI ---
+    // Le bouton capture reste TOUJOURS hidden (mode auto via ESP32). On le garde
+    // dans le DOM uniquement pour reutiliser la logique du click handler (cf.
+    // declenchement programmatique depuis le socket listener command_from_esp).
     function setState(state) {
-        // states: 'preview' (live cam + bouton scan), 'loading', 'result'
+        // states: 'preview' (live cam + attente ESP32), 'loading', 'result'
         if (state === 'preview') {
-            captureBtn.classList.remove('hidden');
             captureBtn.disabled = false;
             newScanBtn.classList.remove('visible');
             loadingOverlay.classList.remove('visible');
             resultOverlay.classList.remove('visible', 'success', 'uncertain', 'error');
             frozenImg.classList.remove('visible');
             hint.classList.remove('hidden');
-            statusEl.textContent = '🟢 Prêt';
+            statusEl.textContent = '🟢 En attente';
         } else if (state === 'loading') {
-            captureBtn.classList.add('hidden');
             captureBtn.disabled = true;
             newScanBtn.classList.remove('visible');
             loadingOverlay.classList.add('visible');
             hint.classList.add('hidden');
             statusEl.textContent = '🔄 Analyse...';
         } else if (state === 'result') {
-            captureBtn.classList.add('hidden');
             newScanBtn.classList.add('visible');
             loadingOverlay.classList.remove('visible');
             hint.classList.add('hidden');
