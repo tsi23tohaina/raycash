@@ -330,10 +330,10 @@
             <div class="stat-label">Total points</div>
             <div class="stat-value" id="statPoints">0</div>
         </div>
-        <div class="stat accuracy">
-            <div class="stat-label">Précision modèle</div>
-            <div class="stat-value" id="statAccuracy">—</div>
-            <div class="stat-sub" id="statAccuracySub">référence</div>
+        <div class="stat non-recyclable">
+            <div class="stat-label">Non recyclables</div>
+            <div class="stat-value" id="statNonRecyclable">0</div>
+            <div class="stat-sub" id="statNonRecyclableSub">refusés</div>
         </div>
     </div>
 
@@ -386,8 +386,8 @@
     const statObjects = document.getElementById('statObjects');
     const statRecyclable = document.getElementById('statRecyclable');
     const statPoints = document.getElementById('statPoints');
-    const statAccuracy = document.getElementById('statAccuracy');
-    const statAccuracySub = document.getElementById('statAccuracySub');
+    const statNonRecyclable = document.getElementById('statNonRecyclable');
+    const statNonRecyclableSub = document.getElementById('statNonRecyclableSub');
     const scansGrid = document.getElementById('scansGrid');
     const empty = document.getElementById('empty');
     const phoneBadge = document.getElementById('phoneBadge');
@@ -415,12 +415,22 @@
         return /gemini|gpt|claude|llama|groq|vision ai|cloud ai/i.test(name || '');
     }
 
-    let totals = { objects: 0, recyclable: 0, points: 0 };
+    let totals = { objects: 0, recyclable: 0, nonRecyclable: 0, points: 0 };
 
     function updateTotals() {
         statObjects.textContent = totals.objects;
         statRecyclable.textContent = totals.recyclable;
+        statNonRecyclable.textContent = totals.nonRecyclable;
         statPoints.textContent = totals.points;
+    }
+
+    // Normalise un label LLM en libelle UI : "Inconnu" devient "Non recyclable"
+    // (un dechet que l'IA ne classe pas dans une categorie connue n'est pas
+    // recyclable du point de vue de la machine).
+    function displayLabel(rawLabel, triStatus) {
+        if (!rawLabel || rawLabel === 'Inconnu') return 'Non recyclable';
+        if (triStatus === 'NON_RECYCLABLE') return 'Non recyclable';
+        return rawLabel;
     }
 
     function fmtTime(d) {
@@ -443,7 +453,7 @@
         const isEnsemble = nModels > 1;
         const firstModelName = (meta.model_names && meta.model_names[0]) || '';
 
-        lastScanLabel.textContent = data.label || 'Inconnu';
+        lastScanLabel.textContent = displayLabel(data.label, data.tri_status);
         const labelSource = isEnsemble
             ? `ensemble (${nModels} modèles)`
             : (firstModelName || 'modèle');
@@ -521,10 +531,12 @@
         if (isRecyclable) {
             totals.recyclable += 1;
             totals.points += (data.points || 0);
+        } else {
+            totals.nonRecyclable += 1;
         }
         updateTotals();
 
-        // Footer + stat précision : adapté au backend.
+        // Footer : adapte au backend (nom du modele, pas de stat de precision).
         if (data.ensemble_metadata) {
             const m = data.ensemble_metadata;
             const nModels = m.n_models || 1;
@@ -533,19 +545,11 @@
             const isCloud = isCloudModel(firstName);
 
             if (isEnsemble) {
-                statAccuracy.textContent = (m.global_accuracy * 100).toFixed(2) + '%';
-                statAccuracySub.textContent = `${nModels} modèles · seuil ${(m.thresholds.min_confidence * 100).toFixed(0)}%`;
-                footer.textContent = `RayCash Pro · Ensemble : ${m.model_names.join(' + ')} · Précision test ${(m.global_accuracy*100).toFixed(2)}%`;
+                footer.textContent = `RayCash Pro · Ensemble : ${m.model_names.join(' + ')} · Precision test ${(m.global_accuracy*100).toFixed(2)}%`;
             } else if (isCloud) {
-                // Cloud model : pas de "accuracy" mesurée, on affiche le nom du modèle
-                statAccuracy.textContent = 'Cloud';
-                statAccuracySub.textContent = firstName || 'service externe';
-                footer.textContent = `RayCash Pro · Modèle : ${firstName} · Inférence cloud temps réel`;
+                footer.textContent = `RayCash Pro · Modele : ${firstName} · Inference cloud temps reel`;
             } else {
-                // Single TFLite local
-                statAccuracy.textContent = (m.global_accuracy * 100).toFixed(2) + '%';
-                statAccuracySub.textContent = `1 modèle local · seuil ${(m.thresholds.min_confidence * 100).toFixed(0)}%`;
-                footer.textContent = `RayCash Pro · Modèle local${firstName ? ' : ' + firstName : ''} · Précision test ${(m.global_accuracy*100).toFixed(2)}%`;
+                footer.textContent = `RayCash Pro · Modele local${firstName ? ' : ' + firstName : ''} · Precision test ${(m.global_accuracy*100).toFixed(2)}%`;
             }
         }
 
@@ -558,7 +562,7 @@
             : '';
         card.innerHTML = `
             ${cardImg}
-            <div class="scan-card-label">${escapeHtml(data.label || 'Inconnu')}</div>
+            <div class="scan-card-label">${escapeHtml(displayLabel(data.label, data.tri_status))}</div>
             <div class="scan-card-meta">${escapeHtml(data.confidence || '?')}</div>
             <div class="scan-card-points">${isRecyclable ? '+' + (data.points || 0) + ' pts' : '—'}</div>
         `;

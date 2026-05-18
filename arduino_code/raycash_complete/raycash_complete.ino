@@ -36,7 +36,7 @@ const int ANGLE_REPOS      = 90;
 const int ANGLE_RECYCLABLE = 180;
 const int ANGLE_NON_RECYCLABLE    = 0;
 
-const float DISTANCE_SEUIL_CM   = 10.0;
+const float DISTANCE_SEUIL_CM   = 15.0;
 const unsigned long DEBOUNCE_MS = 50;
 const unsigned long TRI_DUREE_MS         = 2000;  // duree position servo (laisse tomber le dechet)
 const unsigned long TRI_RETOUR_MS        =  500;  // pause avant retour repos
@@ -51,7 +51,14 @@ const char* NTP_SERVER = "pool.ntp.org";
 // =============================================================================
 //                                 OBJETS GLOBAUX
 // =============================================================================
-LiquidCrystal_I2C lcd(0x3F, 16, 2);  // si rien ne s'affiche : essayer 0x27
+// Adresse I2C resolue au boot (auto-detect entre 0x27 et 0x3F). On instancie
+// On instancie 2 LCD statiques (0x27 et 0x3F, les 2 adresses les plus communes
+// pour les modules PCF8574). initLcd() scanne l'I2C au boot et fait pointer
+// `lcd` vers celui qui repond. Si aucun ne repond, le pointeur reste sur lcd27
+// et les calls sont silencieux (pas de plantage).
+LiquidCrystal_I2C lcd27(0x27, 16, 2);
+LiquidCrystal_I2C lcd3F(0x3F, 16, 2);
+LiquidCrystal_I2C* lcd = &lcd27;
 Servo triServo;
 WebServer http(80);
 
@@ -77,6 +84,8 @@ unsigned long derniereVerifWifi   = 0;
 
 float distanceActuelle   = -1.0;
 bool bacPlein            = false;
+int  consecutifsDansZone = 0;     // anti-bruit : exige 2 lectures consecutives < seuil
+int  pointsRecyclable    = 0;     // points du dernier tri RECYCLABLE (pour LCD)
 
 // =============================================================================
 //                                  HMAC HELPERS
@@ -120,8 +129,8 @@ String hmacSign(const String& timestamp, const String& body) {
 void lcdLigne(uint8_t row, const String& texte) {
   char buf[17];
   snprintf(buf, sizeof(buf), "%-16s", texte.c_str());
-  lcd.setCursor(0, row);
-  lcd.print(buf);
+  lcd->setCursor(0, row);
+  lcd->print(buf);
 }
 
 void afficherEtatPrincipal() {
@@ -216,9 +225,13 @@ float mesurerDistanceCm() {
   delayMicroseconds(10);
   digitalWrite(PIN_TRIG, LOW);
 
-  long duree = pulseIn(PIN_ECHO, HIGH, 25000);  // 25 ms = ~4 m
-  if (duree == 0) return -1.0;
-  return duree * 0.034 / 2.0;
+  long duree = pulseIn(PIN_ECHO, HIGH, 30000);  // 30 ms = ~5 m
+  // Filtre les lectures aberrantes :
+  // - duree == 0 : pas d'echo (timeout)
+  // - duree < 200us : ~3.4cm = bruit electrique ou ECHO flottant
+  // - duree > 25000us : trop loin, peu fiable
+  if (duree < 200 || duree > 25000) return -1.0;
+  return duree * 0.0343 / 2.0;
 }
 
 // =============================================================================
@@ -246,20 +259,35 @@ void handleServo() {
   body.trim();
   Serial.printf("[/servo] ordre = %s\n", body.c_str());
 
-  if (body == "RECYCLABLE") {
+  // Parse "TRI_STATUS:points" envoye par le serveur (ex: "RECYCLABLE:40" ou
+  // "NON_RECYCLABLE:0"). Si pas de ":", on fallback en mode tri-status seul.
+  String triStatus = body;
+  int pts = 0;
+  int sep = body.indexOf(':');
+  if (sep > 0) {
+    triStatus = body.substring(0, sep);
+    pts = body.substring(sep + 1).toInt();
+  }
+
+  if (triStatus == "RECYCLABLE") {
+    pointsRecyclable = pts;
     beep(2000, 120);
     triServo.write(ANGLE_RECYCLABLE);
-    lcd.clear();
-    lcdLigne(0, "Dechet accepte!");
-    lcdLigne(1, "Ticket en cours");
+    lcd->clear();
+    // Ligne 1 : "Recyclable", ligne 2 : "+40 pts 4000 ar" (1 pt = 100 ar)
+    char l1[17];
+    snprintf(l1, sizeof(l1), "+%d pts %d ar", pts, pts * 100);
+    lcdLigne(0, "Recyclable");
+    lcdLigne(1, l1);
     etatTri = TRI_PIVOT;
     triT0 = millis();
-  } else if (body == "NON_RECYCLABLE") {
+  } else if (triStatus == "NON_RECYCLABLE") {
+    pointsRecyclable = 0;
     beep(350, 600);
     triServo.write(ANGLE_NON_RECYCLABLE);
-    lcd.clear();
+    lcd->clear();
     lcdLigne(0, "Non recyclable");
-    lcdLigne(1, "Pas de ticket");
+    lcdLigne(1, "0 pts");
     etatTri = TRI_PIVOT;
     triT0 = millis();
   } else {
@@ -289,7 +317,7 @@ void avancerEtatTri() {
     etatTri = TRI_INACTIF;
     verrouSignal = false;
     waitingForClear = true;  // empeche re-trigger tant que l'objet n'est pas retire
-    lcd.clear();
+    lcd->clear();
   }
 }
 
@@ -313,8 +341,26 @@ void setup() {
   triServo.write(ANGLE_REPOS);
 
   Wire.begin();
-  lcd.init();
-  lcd.backlight();
+  delay(50);
+
+  // Scan I2C : detecte sur quelle adresse repond le module PCF8574 du LCD.
+  // 0x27 et 0x3F sont les 2 communes ; le pointeur "lcd" est redirige vers
+  // l'objet statique pre-construit a la bonne adresse.
+  Wire.beginTransmission(0x27);
+  if (Wire.endTransmission() == 0) {
+    lcd = &lcd27;
+    Serial.println("[I2C] LCD detecte a 0x27");
+  } else {
+    Wire.beginTransmission(0x3F);
+    if (Wire.endTransmission() == 0) {
+      lcd = &lcd3F;
+      Serial.println("[I2C] LCD detecte a 0x3F");
+    } else {
+      Serial.println("[I2C] AUCUN LCD detecte (cablage SDA=21 SCL=22 ? 5V ? GND ?)");
+    }
+  }
+  lcd->init();
+  lcd->backlight();
   lcdLigne(0, "RayCash boot...");
   lcdLigne(1, "Wi-Fi en cours");
 
@@ -340,7 +386,7 @@ void setup() {
   http.begin();
   Serial.println("[HTTP] serveur local pret");
   delay(800);
-  lcd.clear();
+  lcd->clear();
 }
 
 void loop() {
@@ -357,7 +403,7 @@ void loop() {
     verrouSignal = false;
     etatTri = TRI_INACTIF;
     triServo.write(ANGLE_REPOS);
-    lcd.clear();
+    lcd->clear();
     Serial.println(systemeActive ? "[BTN] ACTIVE" : "[BTN] VEILLE");
     beep(systemeActive ? 1000 : 500, 200);
   }
@@ -375,6 +421,15 @@ void loop() {
     bool zoneOccupee = (distanceActuelle > 0 && distanceActuelle <= DISTANCE_SEUIL_CM);
     bool zoneLibre   = (distanceActuelle < 0 || distanceActuelle > DISTANCE_SEUIL_CM);
 
+    // Anti-bruit : exige 2 lectures consecutives "in zone" avant de declencher.
+    // Filtre les spikes HC-SR04 quand le capteur est mal cable ou mal alimente.
+    if (zoneOccupee) {
+      if (consecutifsDansZone < 10) consecutifsDansZone++;
+    } else {
+      consecutifsDansZone = 0;
+    }
+    bool detectionStable = (consecutifsDansZone >= 2);
+
     // Apres un tri, on attend que la zone soit liberee avant d'autoriser un
     // nouveau trigger (sinon le meme dechet declenche en boucle).
     if (waitingForClear && zoneLibre) {
@@ -382,7 +437,7 @@ void loop() {
       Serial.println("[SR04] zone liberee, re-arme");
     }
 
-    if (zoneOccupee && !verrouSignal && !waitingForClear) {
+    if (detectionStable && !verrouSignal && !waitingForClear) {
       Serial.printf("[SR04] seuil atteint (%.1f cm) -> POST START\n", distanceActuelle);
       verrouSignal = true;
       verrouT0 = millis();
