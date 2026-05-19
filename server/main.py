@@ -367,14 +367,30 @@ def predict():
             # Pilotage du servo ESP32 — best-effort. Body format : "TRI_STATUS:points"
             # ex: "RECYCLABLE:40" ou "NON_RECYCLABLE:0". L'ESP32 parse pour afficher
             # les points sur le LCD.
-            try:
-                esp32_session.post(
-                    f"{_get_esp32_url()}/servo",
-                    data=f"{pred.tri_status}:{pred.points}",
-                    timeout=SETTINGS.esp32_timeout_seconds,
-                )
-            except requests.RequestException as e:
-                log.warning("Impossible de joindre l'ESP32 : %s", e)
+            #
+            # Robustesse : 3 essais avec timeouts progressifs (3s, 5s, 8s) au
+            # lieu d'un seul shot a 2s. Les premieres connexions TCP a un ESP32
+            # qui vient de boot peuvent etre lentes (ARP cache miss + DHCP).
+            esp32_url = _get_esp32_url()
+            timeouts = [3.0, 5.0, 8.0]
+            for attempt, t in enumerate(timeouts, 1):
+                try:
+                    esp32_session.post(
+                        f"{esp32_url}/servo",
+                        data=f"{pred.tri_status}:{pred.points}",
+                        timeout=t,
+                    )
+                    if attempt > 1:
+                        log.info("ESP32 /servo OK au essai %d", attempt)
+                    break
+                except requests.RequestException as e:
+                    if attempt == len(timeouts):
+                        log.warning(
+                            "Impossible de joindre l'ESP32 (%s) apres %d essais : %s",
+                            esp32_url, attempt, e,
+                        )
+                    else:
+                        log.info("ESP32 /servo essai %d echoue (%s), retry...", attempt, e)
 
         response = {
             "label": pred.label,
