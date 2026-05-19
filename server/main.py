@@ -2,6 +2,8 @@ import base64
 import io
 import logging
 import os
+import threading
+import time
 import uuid
 from logging.handlers import RotatingFileHandler
 
@@ -161,19 +163,51 @@ scan_repo = ScanRepository(db_path=SETTINGS.db_path)
 esp32_session = requests.Session()
 esp32_session.headers.update({"X-API-Key": SETTINGS.api_key})
 
-# IP de l'ESP32 capturee dynamiquement a chaque /esp_signal entrant. Permet
-# au callback /servo de joindre l'ESP32 sans config statique dans .env :
-# l'ESP32 "annonce" sa propre IP a chaque fois qu'il declenche un scan.
-# Si vide (ex: au boot avant tout signal ESP32), on retombe sur SETTINGS.esp32_ip
-# du .env comme fallback.
+# IP de l'ESP32 capturee dynamiquement a chaque /esp_signal entrant. Gardee
+# en log pour diagnostic mais plus utilisee comme target d'un callback : le
+# nouveau modele est pull-based (ESP32 polle /esp_verdict).
 _esp32_runtime_ip: str | None = None
 
-def _get_esp32_url() -> str:
-    """Retourne l'URL ESP32 a utiliser pour le callback /servo. Priorite a
-    l'IP capturee a runtime (auto-decouverte), fallback sur .env si vide."""
-    if _esp32_runtime_ip:
-        return f"http://{_esp32_runtime_ip}"
-    return SETTINGS.esp32_ip
+# ---- ARCHITECTURE POLLING ----
+# Pourquoi : sur certains reseaux (Wi-Fi corporate avec client isolation,
+# public Wi-Fi, certains hotspots), le serveur ne peut PAS initier une
+# connexion vers l'ESP32 meme si l'ESP32 peut sortir vers le serveur. On
+# inverse donc le sens : le serveur stocke le dernier verdict en memoire,
+# et l'ESP32 polle GET /esp_verdict apres chaque /esp_signal jusqu'a obtenir
+# le verdict.
+#
+# Avantages :
+#   - marche sur n'importe quel reseau (seules les requetes sortantes
+#     ESP32->serveur sont necessaires)
+#   - pas de port a ouvrir sur l'ESP32, pas de WebServer embarque
+#   - facile a tester unitairement (juste GET/POST HTTP)
+#
+# Le verdict est stocke dans une file thread-safe avec timestamp pour
+# expirer les verdicts trop vieux (pas de zombie si l'ESP32 reboot).
+_verdict_lock = threading.Lock()
+_pending_verdict: dict | None = None  # {"body": "RECYCLABLE:40", "ts": 1779...}
+_VERDICT_TTL_S = 30  # un verdict expire apres 30s s'il n'est pas reclame
+
+def set_verdict(body: str) -> None:
+    """Stocke un verdict pour le prochain GET /esp_verdict. Thread-safe."""
+    global _pending_verdict
+    with _verdict_lock:
+        _pending_verdict = {"body": body, "ts": time.time()}
+        log.info("Verdict en file pour ESP32 : %s", body)
+
+def consume_verdict() -> str | None:
+    """Recupere et supprime le verdict pending. Retourne None si rien ou expire."""
+    global _pending_verdict
+    with _verdict_lock:
+        if _pending_verdict is None:
+            return None
+        if time.time() - _pending_verdict["ts"] > _VERDICT_TTL_S:
+            log.info("Verdict expire (>%ds), drop", _VERDICT_TTL_S)
+            _pending_verdict = None
+            return None
+        body = _pending_verdict["body"]
+        _pending_verdict = None
+        return body
 
 # --- SECURITY DECORATORS ---
 require_api_key = make_require_api_key(SETTINGS.api_key)
@@ -245,6 +279,25 @@ def esp_signal():
         socketio.emit("command_from_esp", {"action": "START"})
         return jsonify({"status": "capture_triggered"}), 200
     return jsonify({"status": "ignored"}), 200
+
+
+@app.route("/esp_verdict", methods=["GET"])
+@limiter.limit(lambda: SETTINGS.rate_limit_esp_signal)
+@require_api_key
+def esp_verdict():
+    """Polling endpoint pour l'ESP32. Retourne le dernier verdict en file
+    (body text/plain "TRI_STATUS:points") ou 204 si rien. Le verdict est
+    consomme : un seul ESP32 le recupere, les polls suivants verront 204
+    jusqu'au prochain scan.
+
+    Contrairement a /esp_signal, pas de HMAC ici : on est en lecture pure
+    et l'API key suffit pour l'isolation entre operateurs. Cela evite a
+    l'ESP32 de signer chaque poll (1 par 500ms = beaucoup d'overhead).
+    """
+    v = consume_verdict()
+    if v is None:
+        return ("", 204)
+    return (v, 200, {"Content-Type": "text/plain; charset=utf-8"})
 
 
 def _validate_and_load_image(file):
@@ -364,33 +417,11 @@ def predict():
             except Exception:
                 log.exception("Persistance du scan a échoué")
 
-            # Pilotage du servo ESP32 — best-effort. Body format : "TRI_STATUS:points"
-            # ex: "RECYCLABLE:40" ou "NON_RECYCLABLE:0". L'ESP32 parse pour afficher
-            # les points sur le LCD.
-            #
-            # Robustesse : 3 essais avec timeouts progressifs (3s, 5s, 8s) au
-            # lieu d'un seul shot a 2s. Les premieres connexions TCP a un ESP32
-            # qui vient de boot peuvent etre lentes (ARP cache miss + DHCP).
-            esp32_url = _get_esp32_url()
-            timeouts = [3.0, 5.0, 8.0]
-            for attempt, t in enumerate(timeouts, 1):
-                try:
-                    esp32_session.post(
-                        f"{esp32_url}/servo",
-                        data=f"{pred.tri_status}:{pred.points}",
-                        timeout=t,
-                    )
-                    if attempt > 1:
-                        log.info("ESP32 /servo OK au essai %d", attempt)
-                    break
-                except requests.RequestException as e:
-                    if attempt == len(timeouts):
-                        log.warning(
-                            "Impossible de joindre l'ESP32 (%s) apres %d essais : %s",
-                            esp32_url, attempt, e,
-                        )
-                    else:
-                        log.info("ESP32 /servo essai %d echoue (%s), retry...", attempt, e)
+            # Architecture polling : on ne POST plus vers l'ESP32 (necessitait
+            # une connexion entrante, bloquee par certains reseaux). A la place,
+            # on stocke le verdict en memoire et l'ESP32 le recupere via
+            # GET /esp_verdict (poll regulier apres son /esp_signal).
+            set_verdict(f"{pred.tri_status}:{pred.points}")
 
         response = {
             "label": pred.label,

@@ -1,7 +1,6 @@
 // raycash_complete.ino -- version stable avec validation temporelle ultrason
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <WebServer.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <ESP32Servo.h>
@@ -50,7 +49,8 @@ LiquidCrystal_I2C* lcd = nullptr;
 bool lcdReady = false;
 
 Servo triServo;
-WebServer http(80);
+// Plus de WebServer : on est passe sur une archi pull (l'ESP32 polle
+// GET /esp_verdict apres /esp_signal). Aucun port a ecouter cote ESP32.
 
 // =============================================================================
 //                                    ETATS
@@ -368,37 +368,24 @@ void beep(int freq, int dureeMs) {
 }
 
 // =============================================================================
-//                              ROUTES SERVEUR LOCAL
+//                              POLLING VERDICT
 // =============================================================================
-void handleServo() {
-  http.collectHeaders((const char*[]){"X-API-Key"}, 1);
-  if (!http.hasHeader("X-API-Key") || http.header("X-API-Key") != String(RAYCASH_API_KEY)) {
-    http.send(401, "application/json", "{\"error\":\"unauthorized\"}");
-    return;
-  }
-  if (!systemeActive) {
-    http.send(200, "application/json", "{\"status\":\"ignored_system_off\"}");
-    return;
-  }
-  String body = http.arg("plain");
-  body.trim();
-  Serial.printf("[/servo] ordre = %s\n", body.c_str());
+// L'ESP32 polle GET /esp_verdict apres son /esp_signal, jusqu'a recevoir
+// le verdict du serveur (TRI_STATUS:points). Pas de WebServer entrant
+// donc pas de port a ouvrir, marche sur n'importe quel reseau (Wi-Fi
+// corporate, public, hotspot, peu importe).
 
-  // Format attendu : "TRI_STATUS:points:label" (ex: "RECYCLABLE:40:Plastique").
-  // Backward compat : si pas de 2eme ":", le label est vide.
+// Applique le verdict recu (memes effets visibles que l'ancien handleServo).
+void appliquerVerdict(const String& body) {
+  Serial.printf("[VERDICT] recu = %s\n", body.c_str());
+
+  // Format : "TRI_STATUS:points" (ex: "RECYCLABLE:40").
   String triStatus = body;
   int pts = 0;
-  String label = "";
-  int sep1 = body.indexOf(':');
-  if (sep1 > 0) {
-    triStatus = body.substring(0, sep1);
-    int sep2 = body.indexOf(':', sep1 + 1);
-    if (sep2 > 0) {
-      pts = body.substring(sep1 + 1, sep2).toInt();
-      label = body.substring(sep2 + 1);
-    } else {
-      pts = body.substring(sep1 + 1).toInt();
-    }
+  int sep = body.indexOf(':');
+  if (sep > 0) {
+    triStatus = body.substring(0, sep);
+    pts = body.substring(sep + 1).toInt();
   }
 
   if (triStatus == "RECYCLABLE") {
@@ -407,15 +394,8 @@ void handleServo() {
     beep(2000, 120);
     triServo.write(ANGLE_RECYCLABLE);
     lcdSafeClear();
-    // Ligne 1 : "Recyclable" (toujours en clair).
-    // Ligne 2 : "<label> +<pts>" si le serveur envoie le label (format
-    // "TRI:points:label"), sinon juste "+<pts> pts".
     char l1[24];
-    if (label.length() > 0) {
-      snprintf(l1, sizeof(l1), "%s +%d", label.c_str(), pts);
-    } else {
-      snprintf(l1, sizeof(l1), "+%d pts", pts);
-    }
+    snprintf(l1, sizeof(l1), "+%d pts", pts);
     lcdLigne(0, "Recyclable");
     lcdLigne(1, l1);
     etatTri = TRI_PIVOT;
@@ -430,14 +410,42 @@ void handleServo() {
     etatTri = TRI_PIVOT;
     triT0 = millis();
   } else {
-    http.send(400, "application/json", "{\"error\":\"action_invalide\"}");
-    return;
+    Serial.printf("[VERDICT] format invalide : %s\n", body.c_str());
   }
-  http.send(200, "application/json", "{\"status\":\"ok\"}");
 }
 
-void handleHealth() {
-  http.send(200, "application/json", "{\"status\":\"ok\"}");
+// Fait UN poll vers GET /esp_verdict. Retourne true si on a recu un verdict
+// (corps non-vide), false si 204/timeout/erreur.
+bool pollVerdictUneFois() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  // Construit l'URL /esp_verdict en remplacant /esp_signal -> /esp_verdict.
+  String verdictUrl = String(SERVER_URL);
+  int sigPos = verdictUrl.indexOf("/esp_signal");
+  if (sigPos >= 0) {
+    verdictUrl = verdictUrl.substring(0, sigPos) + "/esp_verdict";
+  } else {
+    verdictUrl += "/esp_verdict";
+  }
+
+  HTTPClient client;
+  client.begin(verdictUrl);
+  client.setTimeout(2000);
+  client.addHeader("X-API-Key", RAYCASH_API_KEY);
+  int code = client.GET();
+  bool gotVerdict = false;
+  if (code == 200) {
+    String body = client.getString();
+    body.trim();
+    if (body.length() > 0) {
+      appliquerVerdict(body);
+      gotVerdict = true;
+    }
+  } else if (code != 204) {
+    Serial.printf("[POLL] code inattendu : %d\n", code);
+  }
+  client.end();
+  return gotVerdict;
 }
 
 // =============================================================================
@@ -521,13 +529,8 @@ void setup() {
   syncNtp();
   derniereReSynchNtp = millis();
 
-  http.on("/servo",  HTTP_POST, handleServo);
-  http.on("/health", HTTP_GET,  handleHealth);
-  http.onNotFound([]() {
-    http.send(404, "application/json", "{\"error\":\"not_found\"}");
-  });
-  http.begin();
-  Serial.println("[HTTP] serveur local pret");
+  // Plus de WebServer entrant : on poll /esp_verdict apres chaque /esp_signal.
+  Serial.println("[POLL] architecture pull active (GET /esp_verdict)");
   delay(800);
   lcdSafeClear();
   lcdLigne(0, "RayCash: pret");
@@ -551,7 +554,6 @@ void setup() {
 //                                  LOOP
 // =============================================================================
 void loop() {
-  http.handleClient();
   verifierWifi();
 
   if (time(nullptr) < 1700000000 && (millis() - derniereReSynchNtp > 3600000)) {
@@ -589,9 +591,21 @@ void loop() {
     gererDetection();   // cette fonction lit la distance et gère les timings
   }
 
-  // Timeout verrou
+  // Polling /esp_verdict : tant que verrouSignal est actif (en attente du
+  // verdict apres /esp_signal), on poll toutes les POLL_INTERVAL_MS. Des
+  // reception d'un verdict non-vide, appliquerVerdict() bascule etatTri
+  // sur TRI_PIVOT et le polling s'arrete naturellement (etatTri != INACTIF).
+  static unsigned long lastPoll = 0;
+  const unsigned long POLL_INTERVAL_MS = 500;
+  if (verrouSignal && etatTri == TRI_INACTIF && millis() - lastPoll >= POLL_INTERVAL_MS) {
+    lastPoll = millis();
+    pollVerdictUneFois();  // si verdict recu, etatTri passe a TRI_PIVOT
+  }
+
+  // Timeout verrou : si apres VERROU_TIMEOUT_MS aucun verdict recu, on
+  // libere pour ne pas rester bloque indefiniment (server down, etc.).
   if (verrouSignal && etatTri == TRI_INACTIF && millis() - verrouT0 > VERROU_TIMEOUT_MS) {
-    Serial.println("[LOCK] timeout, libere verrou");
+    Serial.println("[LOCK] timeout poll verdict, libere verrou");
     verrouSignal = false;
     attenteLiberation = true;
     debutAbsence = 0;
